@@ -4,6 +4,10 @@ PKG_NAME:=qca-nss-fw
 PKG_VERSION:=12.0.r1
 PKG_RELEASE:=002
 
+PKG_SOURCE_PROTO:=git
+PKG_SOURCE_URL:=https://github.com/quic/qca-sdk-nss-fw
+PKG_SOURCE_VERSION:=main
+
 include $(INCLUDE_DIR)/package.mk
 
 define generate-qca-nss-fw
@@ -26,12 +30,14 @@ define generate-qca-nss-fw
     FILE:=BIN-NSS.FW.$(PKG_VERSION)-$(PKG_RELEASE)-$(2).$(4).tar.bz2
     HASH:=$(6)
   endef
-  $$(if $$(CONFIG_PACKAGE_$(PKG_NAME)-$(1)-$(3)), \
-    $$(eval $$(call Download,$(PKG_NAME)-$(1)-$(3))) \
-  )
+#   $$(if $$(CONFIG_PACKAGE_$(PKG_NAME)-$(1)-$(3)), \
+#     $$(eval $$(call Download,$(PKG_NAME)-$(1)-$(3))) \
+#   )
 
   define Prepare/$(PKG_NAME)-$(1)-$(3)
-	bzcat $$(DL_DIR)/BIN-NSS.FW.$(PKG_VERSION)-$(PKG_RELEASE)-$(2).$(4).tar.bz2 \
+	# bzcat $$(DL_DIR)/BIN-NSS.FW.$(PKG_VERSION)-$(PKG_RELEASE)-$(2).$(4).tar.bz2 \
+	# 	| $$(HOST_TAR) -C $$(PKG_BUILD_DIR) $$(TAR_OPTIONS)
+	bzcat $$(PKG_BUILD_DIR)/QCA_Networking*.SPF_*/*/IPQ*.ATH.*/BIN-NSS.FW.$(PKG_VERSION)-$(PKG_RELEASE)-$(2).$(4).tar.bz2 \
 		| $$(HOST_TAR) -C $$(PKG_BUILD_DIR) $$(TAR_OPTIONS)
   endef
 
@@ -60,6 +66,7 @@ $(eval $(call generate-qca-nss-fw,ipq60xx,CP,retail,R,retail_router,f92d840a9d14
 $(eval $(call generate-qca-nss-fw,ipq807x,HK,retail,R,retail_router,832c895835c9bb4259c238dc01ad872a853838863632801d55cb13267d296ea2))
 
 define Build/Prepare
+  $(call Build/Prepare/Default)
 	$(foreach pkg, $(ALL_PACKAGE),
 		$(if $(CONFIG_PACKAGE_$(pkg)),
 			$(call Prepare/$(pkg))
