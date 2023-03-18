@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo add-apt-repository ppa:npalix/coccinelle
+          sudo apt update
+          sudo apt install build-essential clang flex g++ gawk gcc-multilib gettext \
+            git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev \
+            coccinelle
+
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Update and install feeds
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Configure
+        run: |
+          cat <<EOF | sed -E 's/^  //' >.config
+            CONFIG_TARGET_ipq50xx=y
+            CONFIG_TARGET_ipq50xx_arm=y
+            CONFIG_TARGET_ipq50xx_arm_DEVICE_redmi_ax3000=y
+
+            CONFIG_PACKAGE_kmod-qca-nss-ecm-standard=y
+            CONFIG_PACKAGE_kmod-qca-nss-drv-pppoe=n
+
+            CONFIG_PACKAGE_luci=y
+          EOF
+          make defconfig
+
+      - name: Download
+        run: |
+          make -j16 download
+
+      - name: Build tools
+        run: |
+          make -j$(nproc) tools/install
+
+      - name: Build toolchain
+        run: |
+          make -j$(nproc) toolchain/install
+
+      - name: Build all
+        run: |
+          make -j$(nproc)
+
+      - name: Upload bin to artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: bin-ipq50xx
+          path: bin/targets/ipq50xx/arm/*
+
+      - name: Upload dl to artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: dl
+          path: dl/*
+
+      - name: Tar
+        run: |
+          tar cvf dl.tar -C dl/ .
+          tar cvf bin-ipq50xx.tar -C bin/targets/ipq50xx/arm/ .
+
+      - name: Release
+        run: |
+          TIME="$(curl https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} | jq -r .created_at)"
+
+          cat <<EOF | sed -E 's/^  //' >Release.md
+            CI ${GITHUB_REF_NAME} $(date -d "$TIME" -u +'%Y-%m-%d %H:%M:%S %Z(%:z)')
+
+            # ${GITHUB_REF_NAME}
+
+            $(date -d "$TIME" -u +'%Y-%m-%d %H:%M:%S %Z(%:z)')
+
+            ## Sources
+            $(cat bin/targets/ipq50xx/arm/feeds.buildinfo | awk -F'[ ^]' '{print $2 ": `" $4 "`"}')
+
+            ## SHA256
+            $(cat bin/targets/ipq50xx/arm/sha256sums | awk '{printf "%s: `%s`\n", $2, $1}' | sed -E 's/^\*//')
+          EOF
+
+          tag="ci-${GITHUB_REF_NAME}-$(date -d "$TIME" -u +'%Y%m%d-%H%M%S-%Z')"
+          hub release create  -t "$GITHUB_SHA" "$tag" -F Release.md --prerelease \
+            -a bin/targets/ipq50xx/arm/sha256sums \
+            $(for a in bin/targets/ipq50xx/arm/*.*; do echo -a "$a"; done) \
+            $(for a in *.tar; do echo -a "$a"; done)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
