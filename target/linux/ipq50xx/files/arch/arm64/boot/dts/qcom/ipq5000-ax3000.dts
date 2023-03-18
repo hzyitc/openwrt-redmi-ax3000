@@ -28,8 +28,23 @@
 
 	chosen {
 		// Override the root parameter from u-boot
-		bootargs-append = " root=/dev/ubiblock0_1";
+		// Increase coherent_pool size for WiFi
+		bootargs-append = " root=/dev/ubiblock0_1 coherent_pool=2M";
 		stdout-path = "serial0:115200n8";
+	};
+
+	reserved-memory {
+		// Not sure why but without this, WiFi will crash
+		tz_apps@4a400000 {
+			no-map;
+			// The size is incorrent, but it works
+			reg = <0x0 0x4a400000 0x0 0x700000>;
+		};
+
+		q6_mem_regions: q6_mem_regions@4B000000 {
+			no-map;
+			reg = <0x0 0x4B000000 0x0 0x3B00000>;
+		};
 	};
 
 	thermal-zones {
@@ -409,4 +424,129 @@
 	ethernet-phy@4 {
 		reg = <4>;
 	};
+};
+
+&q6v5_wcss {
+	memory-region = <&q6_mem_regions>;
+
+	qcom,rproc = <&q6v5_wcss>;
+	firmware = "IPQ5018/q6_fw.mdt";
+
+	qcom,bootargs_smem = <507>;
+	boot-args = <0x2 0x4 0x2 0x1B 0x0 0x0>;
+
+	status = "ok";
+
+	// IPQ5018
+	q6_wcss_pd1: remoteproc_pd1@4ab000 {
+		compatible = "qcom,ipq5018-wcss-ahb-mpd";
+
+		resets =
+			<&gcc GCC_WCSSAON_RESET>,
+			<&gcc GCC_WCSS_BCR>,
+			<&gcc GCC_CE_BCR>;
+		reset-names =
+			"wcss_aon_reset",
+			"wcss_reset",
+			"ce_reset";
+
+		clocks =
+			<&gcc GCC_WCSS_AHB_S_CLK>,
+			<&gcc GCC_WCSS_ACMT_CLK>,
+			<&gcc GCC_WCSS_AXI_M_CLK>;
+		clock-names =
+			"gcc_wcss_ahb_s_clk",
+					"gcc_wcss_acmt_clk",
+					"gcc_wcss_axi_m_clk";
+
+		reg = <0x4ab000 0x20>;
+		reg-names = "rmb";
+
+		// qcom,halt-regs = <&tcsr_q6_block 0xa000 0xd000 0x0>;
+
+		interrupts-extended =
+			<&wcss_smp2p_in 8 0>,
+			<&wcss_smp2p_in 9 0>,
+			<&wcss_smp2p_in 12 0>,
+			<&wcss_smp2p_in 11 0>;
+		interrupt-names =
+			"fatal",
+			"ready",
+			"spawn-ack",
+			"stop-ack";
+
+		qcom,smem-states =
+			<&wcss_smp2p_out 8>,
+			<&wcss_smp2p_out 9>,
+			<&wcss_smp2p_out 10>;
+		qcom,smem-state-names =
+			"shutdown",
+			"stop",
+			"spawn";
+
+		firmware = "IPQ5018/q6_fw.mdt";
+		m3_firmware = "IPQ5018/m3_fw.mdt";
+	};
+
+	// QCN6102
+	q6_wcss_pd2: remoteproc_pd2 {
+		compatible = "qcom,ipq5018-wcss-pcie-mpd";
+
+		interrupts-extended =
+			<&wcss_smp2p_in 16 0>,
+			<&wcss_smp2p_in 17 0>,
+			<&wcss_smp2p_in 20 0>,
+			<&wcss_smp2p_in 19 0>;
+		interrupt-names =
+			"fatal",
+			"ready",
+			"spawn-ack",
+			"stop-ack";
+
+		qcom,smem-states =
+			<&wcss_smp2p_out 16>,
+			<&wcss_smp2p_out 17>,
+			<&wcss_smp2p_out 18>;
+		qcom,smem-state-names =
+			"shutdown",
+			"stop",
+			"spawn";
+
+		firmware = "IPQ5018/q6_fw.mdt";
+		m3_firmware = "qcn6122/m3_fw.mdt";
+	};
+};
+
+&wifi0 {
+	// IPQ5000
+	qcom,multipd_arch;
+	qcom,rproc = <&q6_wcss_pd1>;
+	qcom,userpd-subsys-name = "q6v5_wcss_userpd1";
+
+	// According to the vendor dtb, the board_id is 0x10.
+	// But the boot log show that it will be overridden as 0x24.
+	qcom,board_id = <0x24>;
+
+	qcom,bdf-addr = <0x4C400000 0x4C400000 0x0 0x0 0x0>;
+	qcom,caldb-addr = <0x4D200000>;
+	m3-dump-addr = <0x4D400000>;
+
+	status = "ok";
+};
+
+&wifi1 {
+	// QCN6102
+	qcom,multipd_arch;
+	qcom,rproc = <&q6_wcss_pd2>;
+	qcom,userpd-subsys-name = "q6v5_wcss_userpd2";
+
+	// According to the vendor dtb, the board_id is 0x50.
+	// But the boot log show that it will be overridden as 0x60.
+	qcom,board_id = <0x60>;
+
+	qcom,bdf-addr = <0x4D600000 0x4D600000 0x0 0x0 0x0>;
+	qcom,caldb-addr = <0x4E600000>;
+	m3-dump-addr = <0x4D500000>;
+
+	status = "ok";
 };
