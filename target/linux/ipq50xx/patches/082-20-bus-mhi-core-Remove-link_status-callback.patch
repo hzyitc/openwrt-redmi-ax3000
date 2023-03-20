@@ -1,0 +1,104 @@
+From 01a4e5f071644745afec31359842820b351341d2 Mon Sep 17 00:00:00 2001
+From: Jeffrey Hugo <jhugo@codeaurora.org>
+Date: Fri, 1 May 2020 00:35:52 +0530
+Subject: [PATCH 20/22] bus: mhi: core: Remove link_status() callback
+
+If the MHI core detects invalid data due to a PCI read, it calls into
+the controller via link_status() to double check that the link is infact
+down.  All in all, this is pretty pointless, and racy.  There are no good
+reasons for this, and only drawbacks.
+
+Its pointless because chances are, the controller is going to do the same
+thing to determine if the link is down - attempt a PCI access and compare
+the result.  This does not make the link status decision any smarter.
+
+Its racy because its possible that the link was down at the time of the
+MHI core access, but then recovered before the controller access.  In this
+case, the controller will indicate the link is not down, and the MHI core
+will precede to use a bad value as the MHI core does not attempt to retry
+the access.
+
+Retrying the access in the MHI core is a bad idea because again, it is
+racy - what if the link is down again?  Furthermore, there may be some
+higher level state associated with the link status, that is now invalid
+because the link went down.
+
+The only reason why the MHI core could see "invalid" data when doing a PCI
+access, that is actually valid, is if the register actually contained the
+PCI spec defined sentinel for an invalid access.  In this case, it is
+arguable that the MHI implementation broken, and should be fixed, not
+worked around.
+
+Therefore, remove the link_status() callback before anyone attempts to
+implement it.
+
+Signed-off-by: Jeffrey Hugo <jhugo@codeaurora.org>
+Reviewed-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Reviewed-by: Hemant Kumar <hemantk@codeaurora.org>
+Signed-off-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Link: https://lore.kernel.org/r/20200430190555.32741-4-manivannan.sadhasivam@linaro.org
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+(cherry picked from commit 85a087df4a719ebab940efa3c79625e68161f57b)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/bus/mhi/core/init.c | 6 ++----
+ drivers/bus/mhi/core/main.c | 5 ++---
+ include/linux/mhi.h         | 2 --
+ 3 files changed, 4 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/bus/mhi/core/init.c b/drivers/bus/mhi/core/init.c
+index b38359c480ea..2af08d57ec28 100644
+--- a/drivers/bus/mhi/core/init.c
++++ b/drivers/bus/mhi/core/init.c
+@@ -812,10 +812,8 @@ int mhi_register_controller(struct mhi_controller *mhi_cntrl,
+ 	if (!mhi_cntrl)
+ 		return -EINVAL;
+ 
+-	if (!mhi_cntrl->runtime_get || !mhi_cntrl->runtime_put)
+-		return -EINVAL;
+-
+-	if (!mhi_cntrl->status_cb || !mhi_cntrl->link_status)
++	if (!mhi_cntrl->runtime_get || !mhi_cntrl->runtime_put ||
++	    !mhi_cntrl->status_cb)
+ 		return -EINVAL;
+ 
+ 	ret = parse_config(mhi_cntrl, config);
+diff --git a/drivers/bus/mhi/core/main.c b/drivers/bus/mhi/core/main.c
+index 757955b164a9..505840e1f89d 100644
+--- a/drivers/bus/mhi/core/main.c
++++ b/drivers/bus/mhi/core/main.c
+@@ -20,9 +20,8 @@ int __must_check mhi_read_reg(struct mhi_controller *mhi_cntrl,
+ {
+ 	u32 tmp = readl(base + offset);
+ 
+-	/* If there is any unexpected value, query the link status */
+-	if (PCI_INVALID_READ(tmp) &&
+-	    mhi_cntrl->link_status(mhi_cntrl))
++	/* If the value is invalid, the link is down */
++	if (PCI_INVALID_READ(tmp))
+ 		return -EIO;
+ 
+ 	*out = tmp;
+diff --git a/include/linux/mhi.h b/include/linux/mhi.h
+index a4288f4d656f..c55b399c46bd 100644
+--- a/include/linux/mhi.h
++++ b/include/linux/mhi.h
+@@ -335,7 +335,6 @@ struct mhi_controller_config {
+  * @syserr_worker: System error worker
+  * @state_event: State change event
+  * @status_cb: CB function to notify power states of the device (required)
+- * @link_status: CB function to query link status of the device (required)
+  * @wake_get: CB function to assert device wake (optional)
+  * @wake_put: CB function to de-assert device wake (optional)
+  * @wake_toggle: CB function to assert and de-assert device wake (optional)
+@@ -417,7 +416,6 @@ struct mhi_controller {
+ 
+ 	void (*status_cb)(struct mhi_controller *mhi_cntrl,
+ 			  enum mhi_callback cb);
+-	int (*link_status)(struct mhi_controller *mhi_cntrl);
+ 	void (*wake_get)(struct mhi_controller *mhi_cntrl, bool override);
+ 	void (*wake_put)(struct mhi_controller *mhi_cntrl, bool override);
+ 	void (*wake_toggle)(struct mhi_controller *mhi_cntrl);
+-- 
+2.25.1
+

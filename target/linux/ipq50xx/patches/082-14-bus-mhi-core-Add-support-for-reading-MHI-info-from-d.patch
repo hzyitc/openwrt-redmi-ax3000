@@ -1,0 +1,134 @@
+From ba680343fba7fbd0742ff5011f93450e3b390a1e Mon Sep 17 00:00:00 2001
+From: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Date: Tue, 24 Mar 2020 11:40:45 +0530
+Subject: [PATCH 14/22] bus: mhi: core: Add support for reading MHI info from
+ device
+
+The MHI register base has several registers used for getting the MHI
+specific information such as version, family, major, and minor numbers
+from the device. This information can be used by the controller drivers
+for usecases such as applying quirks for a specific revision etc...
+
+While at it, let's also rearrange the local variables
+in mhi_register_controller().
+
+Suggested-by: Hemant Kumar <hemantk@codeaurora.org>
+Reviewed-by: Jeffrey Hugo <jhugo@codeaurora.org>
+Signed-off-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Link: https://lore.kernel.org/r/20200324061050.14845-3-manivannan.sadhasivam@linaro.org
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+(cherry picked from commit 3316ab2b45f6bf4797d8d65b22fda3cc13318890)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/bus/mhi/core/init.c     | 19 +++++++++++++++++--
+ drivers/bus/mhi/core/internal.h | 10 ++++++++++
+ include/linux/mhi.h             | 17 +++++++++++++++++
+ 3 files changed, 44 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/bus/mhi/core/init.c b/drivers/bus/mhi/core/init.c
+index eb7f556a8531..d136f6c6ca78 100644
+--- a/drivers/bus/mhi/core/init.c
++++ b/drivers/bus/mhi/core/init.c
+@@ -802,12 +802,12 @@ static int parse_config(struct mhi_controller *mhi_cntrl,
+ int mhi_register_controller(struct mhi_controller *mhi_cntrl,
+ 			    struct mhi_controller_config *config)
+ {
+-	int ret;
+-	int i;
+ 	struct mhi_event *mhi_event;
+ 	struct mhi_chan *mhi_chan;
+ 	struct mhi_cmd *mhi_cmd;
+ 	struct mhi_device *mhi_dev;
++	u32 soc_info;
++	int ret, i;
+ 
+ 	if (!mhi_cntrl)
+ 		return -EINVAL;
+@@ -874,6 +874,21 @@ int mhi_register_controller(struct mhi_controller *mhi_cntrl,
+ 		mhi_cntrl->unmap_single = mhi_unmap_single_no_bb;
+ 	}
+ 
++	/* Read the MHI device info */
++	ret = mhi_read_reg(mhi_cntrl, mhi_cntrl->regs,
++			   SOC_HW_VERSION_OFFS, &soc_info);
++	if (ret)
++		goto error_alloc_dev;
++
++	mhi_cntrl->family_number = (soc_info & SOC_HW_VERSION_FAM_NUM_BMSK) >>
++					SOC_HW_VERSION_FAM_NUM_SHFT;
++	mhi_cntrl->device_number = (soc_info & SOC_HW_VERSION_DEV_NUM_BMSK) >>
++					SOC_HW_VERSION_DEV_NUM_SHFT;
++	mhi_cntrl->major_version = (soc_info & SOC_HW_VERSION_MAJOR_VER_BMSK) >>
++					SOC_HW_VERSION_MAJOR_VER_SHFT;
++	mhi_cntrl->minor_version = (soc_info & SOC_HW_VERSION_MINOR_VER_BMSK) >>
++					SOC_HW_VERSION_MINOR_VER_SHFT;
++
+ 	/* Register controller with MHI bus */
+ 	mhi_dev = mhi_alloc_device(mhi_cntrl);
+ 	if (IS_ERR(mhi_dev)) {
+diff --git a/drivers/bus/mhi/core/internal.h b/drivers/bus/mhi/core/internal.h
+index 18066302e6e2..5deadfaa053a 100644
+--- a/drivers/bus/mhi/core/internal.h
++++ b/drivers/bus/mhi/core/internal.h
+@@ -196,6 +196,16 @@ extern struct bus_type mhi_bus_type;
+ #define BHIE_RXVECSTATUS_STATUS_XFER_COMPL (0x02)
+ #define BHIE_RXVECSTATUS_STATUS_ERROR (0x03)
+ 
++#define SOC_HW_VERSION_OFFS (0x224)
++#define SOC_HW_VERSION_FAM_NUM_BMSK (0xF0000000)
++#define SOC_HW_VERSION_FAM_NUM_SHFT (28)
++#define SOC_HW_VERSION_DEV_NUM_BMSK (0x0FFF0000)
++#define SOC_HW_VERSION_DEV_NUM_SHFT (16)
++#define SOC_HW_VERSION_MAJOR_VER_BMSK (0x0000FF00)
++#define SOC_HW_VERSION_MAJOR_VER_SHFT (8)
++#define SOC_HW_VERSION_MINOR_VER_BMSK (0x000000FF)
++#define SOC_HW_VERSION_MINOR_VER_SHFT (0)
++
+ #define EV_CTX_RESERVED_MASK GENMASK(7, 0)
+ #define EV_CTX_INTMODC_MASK GENMASK(15, 8)
+ #define EV_CTX_INTMODC_SHIFT 8
+diff --git a/include/linux/mhi.h b/include/linux/mhi.h
+index d83e7772681b..ad1996001965 100644
+--- a/include/linux/mhi.h
++++ b/include/linux/mhi.h
+@@ -310,6 +310,10 @@ struct mhi_controller_config {
+  * @sw_ev_rings: Number of software event rings
+  * @nr_irqs_req: Number of IRQs required to operate (optional)
+  * @nr_irqs: Number of IRQ allocated by bus master (required)
++ * @family_number: MHI controller family number
++ * @device_number: MHI controller device number
++ * @major_version: MHI controller major revision number
++ * @minor_version: MHI controller minor revision number
+  * @mhi_event: MHI event ring configurations table
+  * @mhi_cmd: MHI command ring configurations table
+  * @mhi_ctxt: MHI device context, shared memory between host and device
+@@ -348,6 +352,15 @@ struct mhi_controller_config {
+  * Fields marked as (required) need to be populated by the controller driver
+  * before calling mhi_register_controller(). For the fields marked as (optional)
+  * they can be populated depending on the usecase.
++ *
++ * The following fields are present for the purpose of implementing any device
++ * specific quirks or customizations for specific MHI revisions used in device
++ * by the controller drivers. The MHI stack will just populate these fields
++ * during mhi_register_controller():
++ *  family_number
++ *  device_number
++ *  major_version
++ *  minor_version
+  */
+ struct mhi_controller {
+ 	struct device *cntrl_dev;
+@@ -375,6 +388,10 @@ struct mhi_controller {
+ 	u32 sw_ev_rings;
+ 	u32 nr_irqs_req;
+ 	u32 nr_irqs;
++	u32 family_number;
++	u32 device_number;
++	u32 major_version;
++	u32 minor_version;
+ 
+ 	struct mhi_event *mhi_event;
+ 	struct mhi_cmd *mhi_cmd;
+-- 
+2.25.1
+

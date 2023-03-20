@@ -1,0 +1,78 @@
+From 290c4f59f992d2180f5fa97f1962053fbe5eab1b Mon Sep 17 00:00:00 2001
+From: Bhaumik Bhatt <bbhatt@codeaurora.org>
+Date: Tue, 29 Sep 2020 23:22:09 +0530
+Subject: [PATCH 1/2] bus: mhi: core: Introduce APIs to allocate and free the
+ MHI controller
+
+Client devices should use the APIs provided to allocate and free
+the MHI controller structure. This will help ensure that the
+structure is zero-initialized and there are no false positives
+with respect to reading any values such as the serial number or
+the OEM PK hash.
+
+Suggested-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Reviewed-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Signed-off-by: Bhaumik Bhatt <bbhatt@codeaurora.org>
+Signed-off-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Link: https://lore.kernel.org/r/20200929175218.8178-11-manivannan.sadhasivam@linaro.org
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+(cherry picked from commit f42dfbe8f712127031e7b9bc938a1c33cec2ff57)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/bus/mhi/core/init.c | 16 ++++++++++++++++
+ include/linux/mhi.h         | 12 ++++++++++++
+ 2 files changed, 28 insertions(+)
+
+diff --git a/drivers/bus/mhi/core/init.c b/drivers/bus/mhi/core/init.c
+index eb2ab058a01d..2540fe483eae 100644
+--- a/drivers/bus/mhi/core/init.c
++++ b/drivers/bus/mhi/core/init.c
+@@ -948,6 +948,22 @@ void mhi_unregister_controller(struct mhi_controller *mhi_cntrl)
+ }
+ EXPORT_SYMBOL_GPL(mhi_unregister_controller);
+ 
++struct mhi_controller *mhi_alloc_controller(void)
++{
++	struct mhi_controller *mhi_cntrl;
++
++	mhi_cntrl = kzalloc(sizeof(*mhi_cntrl), GFP_KERNEL);
++
++	return mhi_cntrl;
++}
++EXPORT_SYMBOL_GPL(mhi_alloc_controller);
++
++void mhi_free_controller(struct mhi_controller *mhi_cntrl)
++{
++	kfree(mhi_cntrl);
++}
++EXPORT_SYMBOL_GPL(mhi_free_controller);
++
+ int mhi_prepare_for_power_up(struct mhi_controller *mhi_cntrl)
+ {
+ 	struct device *dev = &mhi_cntrl->mhi_dev->dev;
+diff --git a/include/linux/mhi.h b/include/linux/mhi.h
+index e909b8fb8441..b79ea58f1d1d 100644
+--- a/include/linux/mhi.h
++++ b/include/linux/mhi.h
+@@ -521,6 +521,18 @@ struct mhi_driver {
+ #define to_mhi_driver(drv) container_of(drv, struct mhi_driver, driver)
+ #define to_mhi_device(dev) container_of(dev, struct mhi_device, dev)
+ 
++/**
++ * mhi_alloc_controller - Allocate the MHI Controller structure
++ * Allocate the mhi_controller structure using zero initialized memory
++ */
++struct mhi_controller *mhi_alloc_controller(void);
++
++/**
++ * mhi_free_controller - Free the MHI Controller structure
++ * Free the mhi_controller structure which was previously allocated
++ */
++void mhi_free_controller(struct mhi_controller *mhi_cntrl);
++
+ /**
+  * mhi_register_controller - Register MHI controller
+  * @mhi_cntrl: MHI controller to register
+-- 
+2.25.1
+

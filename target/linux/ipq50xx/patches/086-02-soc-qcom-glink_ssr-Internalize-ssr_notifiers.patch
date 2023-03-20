@@ -1,0 +1,125 @@
+From c277c5319d3ce578576e3686b69e25d8c84a813f Mon Sep 17 00:00:00 2001
+From: Bjorn Andersson <bjorn.andersson@linaro.org>
+Date: Wed, 22 Apr 2020 17:37:34 -0700
+Subject: [PATCH 2/2] soc: qcom: glink_ssr: Internalize ssr_notifiers
+
+Rather than carrying a special purpose blocking notifier for glink_ssr
+in remoteproc's qcom_common.c, move it into glink_ssr so allow wider
+reuse of the common one.
+
+The rpmsg glink header file is used in preparation for the next patch.
+
+Acked-by: Chris Lew <clew@codeaurora.org>
+Acked-by: Rishabh Bhatnagar <rishabhb@codeaurora.org>
+Link: https://lore.kernel.org/r/20200423003736.2027371-3-bjorn.andersson@linaro.org
+Signed-off-by: Bjorn Andersson <bjorn.andersson@linaro.org>
+(cherry picked from commit 5d1f2e3c8090c0769ee4a1b920e82277613327fc)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/remoteproc/qcom_common.c |  8 ++++++++
+ drivers/soc/qcom/glink_ssr.c     | 24 +++++++++++++++++++-----
+ include/linux/rpmsg/qcom_glink.h |  6 ++++++
+ 3 files changed, 33 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/remoteproc/qcom_common.c b/drivers/remoteproc/qcom_common.c
+index ff26f2b68752..9028cea2d81e 100644
+--- a/drivers/remoteproc/qcom_common.c
++++ b/drivers/remoteproc/qcom_common.c
+@@ -42,6 +42,13 @@ static void glink_subdev_stop(struct rproc_subdev *subdev, bool crashed)
+ 	glink->edge = NULL;
+ }
+ 
++static void glink_subdev_unprepare(struct rproc_subdev *subdev)
++{
++	struct qcom_rproc_glink *glink = to_glink_subdev(subdev);
++
++	qcom_glink_ssr_notify(glink->ssr_name);
++}
++
+ /**
+  * qcom_add_glink_subdev() - try to add a GLINK subdevice to rproc
+  * @rproc:	rproc handle to parent the subdevice
+@@ -64,6 +71,7 @@ void qcom_add_glink_subdev(struct rproc *rproc, struct qcom_rproc_glink *glink,
+ 	glink->dev = dev;
+ 	glink->subdev.start = glink_subdev_start;
+ 	glink->subdev.stop = glink_subdev_stop;
++	glink->subdev.unprepare = glink_subdev_unprepare;
+ 
+ 	rproc_add_subdev(rproc, &glink->subdev);
+ }
+diff --git a/drivers/soc/qcom/glink_ssr.c b/drivers/soc/qcom/glink_ssr.c
+index d7babe3d67bc..847d79c935f1 100644
+--- a/drivers/soc/qcom/glink_ssr.c
++++ b/drivers/soc/qcom/glink_ssr.c
+@@ -54,6 +54,19 @@ struct glink_ssr {
+ 	struct completion completion;
+ };
+ 
++/* Notifier list for all registered glink_ssr instances */
++static BLOCKING_NOTIFIER_HEAD(ssr_notifiers);
++
++/**
++ * qcom_glink_ssr_notify() - notify GLINK SSR about stopped remoteproc
++ * @ssr_name:	name of the remoteproc that has been stopped
++ */
++void qcom_glink_ssr_notify(const char *ssr_name)
++{
++	blocking_notifier_call_chain(&ssr_notifiers, 0, (void *)ssr_name);
++}
++EXPORT_SYMBOL_GPL(qcom_glink_ssr_notify);
++
+ static int qcom_glink_ssr_callback(struct rpmsg_device *rpdev,
+ 				   void *data, int len, void *priv, u32 addr)
+ {
+@@ -81,8 +94,9 @@ static int qcom_glink_ssr_callback(struct rpmsg_device *rpdev,
+ 	return 0;
+ }
+ 
+-static int qcom_glink_ssr_notify(struct notifier_block *nb, unsigned long event,
+-				 void *data)
++static int qcom_glink_ssr_notifier_call(struct notifier_block *nb,
++					unsigned long event,
++					void *data)
+ {
+ 	struct glink_ssr *ssr = container_of(nb, struct glink_ssr, nb);
+ 	struct do_cleanup_msg msg;
+@@ -121,18 +135,18 @@ static int qcom_glink_ssr_probe(struct rpmsg_device *rpdev)
+ 
+ 	ssr->dev = &rpdev->dev;
+ 	ssr->ept = rpdev->ept;
+-	ssr->nb.notifier_call = qcom_glink_ssr_notify;
++	ssr->nb.notifier_call = qcom_glink_ssr_notifier_call;
+ 
+ 	dev_set_drvdata(&rpdev->dev, ssr);
+ 
+-	return qcom_register_ssr_notifier(&ssr->nb);
++	return blocking_notifier_chain_register(&ssr_notifiers, &ssr->nb);
+ }
+ 
+ static void qcom_glink_ssr_remove(struct rpmsg_device *rpdev)
+ {
+ 	struct glink_ssr *ssr = dev_get_drvdata(&rpdev->dev);
+ 
+-	qcom_unregister_ssr_notifier(&ssr->nb);
++	blocking_notifier_chain_unregister(&ssr_notifiers, &ssr->nb);
+ }
+ 
+ static const struct rpmsg_device_id qcom_glink_ssr_match[] = {
+diff --git a/include/linux/rpmsg/qcom_glink.h b/include/linux/rpmsg/qcom_glink.h
+index 96e26d94719f..09daa0acde2c 100644
+--- a/include/linux/rpmsg/qcom_glink.h
++++ b/include/linux/rpmsg/qcom_glink.h
+@@ -26,4 +26,10 @@ static inline void qcom_glink_smem_unregister(struct qcom_glink *glink) {}
+ 
+ #endif
+ 
++#if IS_ENABLED(CONFIG_RPMSG_QCOM_GLINK_SSR)
++void qcom_glink_ssr_notify(const char *ssr_name);
++#else
++static inline void qcom_glink_ssr_notify(const char *ssr_name) {}
++#endif
++
+ #endif
+-- 
+2.25.1
+

@@ -1,0 +1,37 @@
+From 382ba9034f804e758c34e3f263dd79882e2ccb72 Mon Sep 17 00:00:00 2001
+From: Chen Hui <clare.chenhui@huawei.com>
+Date: Fri, 9 Apr 2021 16:23:52 +0800
+Subject: [PATCH 07/11] clk: qcom: apss-ipq-pll: Add missing
+ MODULE_DEVICE_TABLE
+
+CONFIG_IPQ_APSS_PLL is tristate option and therefore this driver can
+be compiled as a module. This patch adds missing MODULE_DEVICE_TABLE
+definition which generates correct modalias for automatic loading of
+this driver when it is built as an external module.
+
+Fixes: ecd2bacfbbc4 ("clk: qcom: Add ipq apss pll driver")
+Signed-off-by: Chen Hui <clare.chenhui@huawei.com>
+Reviewed-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Link: https://lore.kernel.org/r/20210409082352.233810-4-clare.chenhui@huawei.com
+Signed-off-by: Stephen Boyd <sboyd@kernel.org>
+(cherry picked from commit d0a859edda46b45baeab9687d173102300d76e2b)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/clk/qcom/apss-ipq-pll.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/clk/qcom/apss-ipq-pll.c b/drivers/clk/qcom/apss-ipq-pll.c
+index 30be87fb222a..bef7899ad0d6 100644
+--- a/drivers/clk/qcom/apss-ipq-pll.c
++++ b/drivers/clk/qcom/apss-ipq-pll.c
+@@ -81,6 +81,7 @@ static const struct of_device_id apss_ipq_pll_match_table[] = {
+ 	{ .compatible = "qcom,ipq6018-a53pll" },
+ 	{ }
+ };
++MODULE_DEVICE_TABLE(of, apss_ipq_pll_match_table);
+ 
+ static struct platform_driver apss_ipq_pll_driver = {
+ 	.probe = apss_ipq_pll_probe,
+-- 
+2.25.1
+

@@ -1,0 +1,40 @@
+From 943cd31f3b241e11ce9d7ce66e3f1f4d0a7eed46 Mon Sep 17 00:00:00 2001
+From: Robert Marko <robimarko@gmail.com>
+Date: Fri, 19 Aug 2022 00:06:22 +0200
+Subject: [PATCH 10/11] clk: qcom: apss-ipq6018: mark apcs_alias0_core_clk as
+ critical
+
+While fixing up the driver I noticed that my IPQ8074 board was hanging
+after CPUFreq switched the frequency during boot, WDT would eventually
+reset it.
+
+So mark apcs_alias0_core_clk as critical since its the clock feeding the
+CPU cluster and must never be disabled.
+
+Fixes: 5e77b4ef1b19 ("clk: qcom: Add ipq6018 apss clock controller")
+Signed-off-by: Robert Marko <robimarko@gmail.com>
+Reviewed-by: Dmitry Baryshkov <dmitry.baryshkov@linaro.org>
+Signed-off-by: Bjorn Andersson <andersson@kernel.org>
+Link: https://lore.kernel.org/r/20220818220628.339366-3-robimarko@gmail.com
+(cherry picked from commit 86e78995c93ee182433f965babfccd48417d4dcf)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/clk/qcom/apss-ipq6018.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/clk/qcom/apss-ipq6018.c b/drivers/clk/qcom/apss-ipq6018.c
+index be952d417ded..f2f502e2d5a4 100644
+--- a/drivers/clk/qcom/apss-ipq6018.c
++++ b/drivers/clk/qcom/apss-ipq6018.c
+@@ -56,7 +56,7 @@ static struct clk_branch apcs_alias0_core_clk = {
+ 			.parent_hws = (const struct clk_hw *[]){
+ 				&apcs_alias0_clk_src.clkr.hw },
+ 			.num_parents = 1,
+-			.flags = CLK_SET_RATE_PARENT,
++			.flags = CLK_SET_RATE_PARENT | CLK_IS_CRITICAL,
+ 			.ops = &clk_branch2_ops,
+ 		},
+ 	},
+-- 
+2.25.1
+

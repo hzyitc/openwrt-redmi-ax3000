@@ -1,0 +1,79 @@
+From 6226d09efa16accc7aaeca03df5a37b0e0b5d3bf Mon Sep 17 00:00:00 2001
+From: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Date: Tue, 24 Mar 2020 11:40:47 +0530
+Subject: [PATCH 16/22] bus: mhi: core: Drop the references to mhi_dev in
+ mhi_destroy_device()
+
+For some scenarios like controller suspend and resume, mhi_destroy_device()
+will get called without mhi_unregister_controller(). In that case, the
+references to the mhi_dev created for the channels will not be dropped
+but the channels will be destroyed as per the spec. This will cause issue
+during resume as the channels will not be created due to the fact that
+mhi_dev is not NULL.
+
+Hence, this change decrements the refcount for mhi_dev in
+mhi_destroy_device() for concerned channels and also sets mhi_dev to NULL
+in release_device().
+
+Reported-by: Carl Huang <cjhuang@codeaurora.org>
+Reviewed-by: Jeffrey Hugo <jhugo@codeaurora.org>
+Signed-off-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Link: https://lore.kernel.org/r/20200324061050.14845-5-manivannan.sadhasivam@linaro.org
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+(cherry picked from commit 3eb583a6d0aee952715d34f2bbf58db52c5e7c5e)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/bus/mhi/core/init.c | 12 ++++++++++++
+ drivers/bus/mhi/core/main.c | 13 +++++++++++++
+ 2 files changed, 25 insertions(+)
+
+diff --git a/drivers/bus/mhi/core/init.c b/drivers/bus/mhi/core/init.c
+index f6e3c16225a7..b38359c480ea 100644
+--- a/drivers/bus/mhi/core/init.c
++++ b/drivers/bus/mhi/core/init.c
+@@ -1028,6 +1028,18 @@ static void mhi_release_device(struct device *dev)
+ {
+ 	struct mhi_device *mhi_dev = to_mhi_device(dev);
+ 
++	/*
++	 * We need to set the mhi_chan->mhi_dev to NULL here since the MHI
++	 * devices for the channels will only get created if the mhi_dev
++	 * associated with it is NULL. This scenario will happen during the
++	 * controller suspend and resume.
++	 */
++	if (mhi_dev->ul_chan)
++		mhi_dev->ul_chan->mhi_dev = NULL;
++
++	if (mhi_dev->dl_chan)
++		mhi_dev->dl_chan->mhi_dev = NULL;
++
+ 	kfree(mhi_dev);
+ }
+ 
+diff --git a/drivers/bus/mhi/core/main.c b/drivers/bus/mhi/core/main.c
+index fa1c9000fc6c..eb4256b81406 100644
+--- a/drivers/bus/mhi/core/main.c
++++ b/drivers/bus/mhi/core/main.c
+@@ -244,6 +244,19 @@ int mhi_destroy_device(struct device *dev, void *data)
+ 	if (mhi_dev->dev_type == MHI_DEVICE_CONTROLLER)
+ 		return 0;
+ 
++	/*
++	 * For the suspend and resume case, this function will get called
++	 * without mhi_unregister_controller(). Hence, we need to drop the
++	 * references to mhi_dev created for ul and dl channels. We can
++	 * be sure that there will be no instances of mhi_dev left after
++	 * this.
++	 */
++	if (mhi_dev->ul_chan)
++		put_device(&mhi_dev->ul_chan->mhi_dev->dev);
++
++	if (mhi_dev->dl_chan)
++		put_device(&mhi_dev->dl_chan->mhi_dev->dev);
++
+ 	dev_dbg(&mhi_cntrl->mhi_dev->dev, "destroy device for chan:%s\n",
+ 		 mhi_dev->chan_name);
+ 
+-- 
+2.25.1
+

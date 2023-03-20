@@ -1,0 +1,36 @@
+From c57e893450ac3a34679980273a983fa8310aa87a Mon Sep 17 00:00:00 2001
+From: Dan Carpenter <dan.carpenter@oracle.com>
+Date: Tue, 7 Apr 2020 12:31:33 +0300
+Subject: [PATCH 18/22] bus: mhi: core: Fix a NULL vs IS_ERR check in
+ mhi_create_devices()
+
+The mhi_alloc_device() function never returns NULL, it returns error
+pointers.
+
+Fixes: da1c4f856924 ("bus: mhi: core: Add support for creating and destroying MHI devices")
+Signed-off-by: Dan Carpenter <dan.carpenter@oracle.com>
+Acked-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Link: https://lore.kernel.org/r/20200407093133.GM68494@mwanda
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+(cherry picked from commit 522587e7c008c24f19ef5ef34806268992c5e5a6)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/bus/mhi/core/main.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/bus/mhi/core/main.c b/drivers/bus/mhi/core/main.c
+index 3e9aa3b2da77..757955b164a9 100644
+--- a/drivers/bus/mhi/core/main.c
++++ b/drivers/bus/mhi/core/main.c
+@@ -295,7 +295,7 @@ void mhi_create_devices(struct mhi_controller *mhi_cntrl)
+ 		    !(mhi_chan->ee_mask & BIT(mhi_cntrl->ee)))
+ 			continue;
+ 		mhi_dev = mhi_alloc_device(mhi_cntrl);
+-		if (!mhi_dev)
++		if (IS_ERR(mhi_dev))
+ 			return;
+ 
+ 		mhi_dev->dev_type = MHI_DEVICE_XFER;
+-- 
+2.25.1
+

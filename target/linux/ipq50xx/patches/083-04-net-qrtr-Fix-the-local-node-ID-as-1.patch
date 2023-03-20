@@ -1,0 +1,43 @@
+From 12ec366594c7c6626f070fddd33d9f5adc8f8c05 Mon Sep 17 00:00:00 2001
+From: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Date: Thu, 20 Feb 2020 20:43:27 +0530
+Subject: [PATCH 4/4] net: qrtr: Fix the local node ID as 1
+
+In order to start the QRTR nameservice, the local node ID needs to be
+valid. Hence, fix it to 1. Previously, the node ID was configured through
+a userspace tool before starting the nameservice daemon. Since we have now
+integrated the nameservice handling to kernel, this change is necessary
+for making it functional.
+
+Signed-off-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+(cherry picked from commit 31d6cbeeb88010d59e70e4e0ae9a2b17edebb64e)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ net/qrtr/qrtr.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/net/qrtr/qrtr.c b/net/qrtr/qrtr.c
+index 1390b96903b6..0ad4f75bb84f 100644
+--- a/net/qrtr/qrtr.c
++++ b/net/qrtr/qrtr.c
+@@ -7,7 +7,6 @@
+ #include <linux/netlink.h>
+ #include <linux/qrtr.h>
+ #include <linux/termios.h>	/* For TIOCINQ/OUTQ */
+-#include <linux/numa.h>
+ 
+ #include <net/sock.h>
+ 
+@@ -94,7 +93,7 @@ static inline struct qrtr_sock *qrtr_sk(struct sock *sk)
+ 	return container_of(sk, struct qrtr_sock, sk);
+ }
+ 
+-static unsigned int qrtr_local_nid = NUMA_NO_NODE;
++static unsigned int qrtr_local_nid = 1;
+ 
+ /* for node ids */
+ static RADIX_TREE(qrtr_nodes, GFP_KERNEL);
+-- 
+2.25.1
+

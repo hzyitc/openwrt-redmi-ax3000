@@ -1,0 +1,61 @@
+From 2e45fe3e59a11954a3ac0a8852dd6789f11e9c53 Mon Sep 17 00:00:00 2001
+From: Jeffrey Hugo <jhugo@codeaurora.org>
+Date: Fri, 1 May 2020 00:35:55 +0530
+Subject: [PATCH 22/22] bus: mhi: core: Fix channel device name conflict
+
+When multiple instances of the same MHI product are present in a system,
+we can see a splat from mhi_create_devices() - "sysfs: cannot create
+duplicate filename".
+
+This is because the device names assigned to the MHI channel devices are
+non-unique.  They consist of the channel's name, and the channel's pipe
+id.  For identical products, each instance is going to have the same
+set of channel (both in name and pipe id).
+
+To fix this, we prepend the device name of the parent device that the
+MHI channels belong to.  Since different instances of the same product
+should have unique device names, this makes the MHI channel devices for
+each product also unique.
+
+Additionally, remove the pipe id from the MHI channel device name.  This
+is an internal detail to the MHI product that provides little value, and
+imposes too much device specific internal details to userspace.  It is
+expected that channel with a specific name (ie "SAHARA") has a specific
+client, and it does not matter what pipe id that channel is enumerated on.
+The pipe id is an internal detail between the MHI bus, and the hardware.
+The client is not expected to make decisions based on the pipe id, and to
+do so would require the client to have intimate knowledge of the hardware,
+which is inappropiate as it may violate the layering provided by the MHI
+bus.  The limitation of doing this is that each product may only have one
+instance of a channel by a unique name.  This limitation is appropriate
+given the usecases of MHI channels.
+
+Signed-off-by: Jeffrey Hugo <jhugo@codeaurora.org>
+Reviewed-by: Hemant Kumar <hemantk@codeaurora.org>
+Reviewed-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Signed-off-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Link: https://lore.kernel.org/r/20200430190555.32741-7-manivannan.sadhasivam@linaro.org
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+(cherry picked from commit f0e1d3ac2d7c16a5d2c9d67f5a61133db7681af8)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/bus/mhi/core/main.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/bus/mhi/core/main.c b/drivers/bus/mhi/core/main.c
+index 936524065128..c26eed06e5cc 100644
+--- a/drivers/bus/mhi/core/main.c
++++ b/drivers/bus/mhi/core/main.c
+@@ -328,7 +328,8 @@ void mhi_create_devices(struct mhi_controller *mhi_cntrl)
+ 
+ 		/* Channel name is same for both UL and DL */
+ 		mhi_dev->chan_name = mhi_chan->name;
+-		dev_set_name(&mhi_dev->dev, "%04x_%s", mhi_chan->chan,
++		dev_set_name(&mhi_dev->dev, "%s_%s",
++			     dev_name(mhi_cntrl->cntrl_dev),
+ 			     mhi_dev->chan_name);
+ 
+ 		/* Init wakeup source if available */
+-- 
+2.25.1
+

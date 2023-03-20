@@ -1,0 +1,108 @@
+From c09e7dc60a52758bc67fd87ce86b33d6a27f4fd3 Mon Sep 17 00:00:00 2001
+From: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Date: Thu, 20 Feb 2020 15:28:50 +0530
+Subject: [PATCH 11/22] bus: mhi: core: Add uevent support for module
+ autoloading
+
+Add uevent support to MHI bus so that the client drivers can be autoloaded
+by udev when the MHI devices gets created. The client drivers are
+expected to provide MODULE_DEVICE_TABLE with the MHI id_table struct so
+that the alias can be exported.
+
+Signed-off-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Reviewed-by: Jeffrey Hugo <jhugo@codeaurora.org>
+Tested-by: Jeffrey Hugo <jhugo@codeaurora.org>
+Link: https://lore.kernel.org/r/20200220095854.4804-13-manivannan.sadhasivam@linaro.org
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+(cherry picked from commit e6b0de469c5babfe29a86be289408ba2070ea44a)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/bus/mhi/core/init.c       |  9 +++++++++
+ include/linux/mod_devicetable.h   |  1 +
+ scripts/mod/devicetable-offsets.c |  3 +++
+ scripts/mod/file2alias.c          | 10 ++++++++++
+ 4 files changed, 23 insertions(+)
+
+diff --git a/drivers/bus/mhi/core/init.c b/drivers/bus/mhi/core/init.c
+index 7bfffa9a5ad1..5fb756ca335e 100644
+--- a/drivers/bus/mhi/core/init.c
++++ b/drivers/bus/mhi/core/init.c
+@@ -1210,6 +1210,14 @@ void mhi_driver_unregister(struct mhi_driver *mhi_drv)
+ }
+ EXPORT_SYMBOL_GPL(mhi_driver_unregister);
+ 
++static int mhi_uevent(struct device *dev, struct kobj_uevent_env *env)
++{
++	struct mhi_device *mhi_dev = to_mhi_device(dev);
++
++	return add_uevent_var(env, "MODALIAS=" MHI_DEVICE_MODALIAS_FMT,
++					mhi_dev->chan_name);
++}
++
+ static int mhi_match(struct device *dev, struct device_driver *drv)
+ {
+ 	struct mhi_device *mhi_dev = to_mhi_device(dev);
+@@ -1236,6 +1244,7 @@ struct bus_type mhi_bus_type = {
+ 	.name = "mhi",
+ 	.dev_name = "mhi",
+ 	.match = mhi_match,
++	.uevent = mhi_uevent,
+ };
+ 
+ static int __init mhi_init(void)
+diff --git a/include/linux/mod_devicetable.h b/include/linux/mod_devicetable.h
+index d990204e5bbc..860f1c2a3290 100644
+--- a/include/linux/mod_devicetable.h
++++ b/include/linux/mod_devicetable.h
+@@ -825,6 +825,7 @@ struct wmi_device_id {
+ 	const void *context;
+ };
+ 
++#define MHI_DEVICE_MODALIAS_FMT "mhi:%s"
+ #define MHI_NAME_SIZE 32
+ 
+ /**
+diff --git a/scripts/mod/devicetable-offsets.c b/scripts/mod/devicetable-offsets.c
+index 054405b90ba4..fe3f4a95cb21 100644
+--- a/scripts/mod/devicetable-offsets.c
++++ b/scripts/mod/devicetable-offsets.c
+@@ -231,5 +231,8 @@ int main(void)
+ 	DEVID(wmi_device_id);
+ 	DEVID_FIELD(wmi_device_id, guid_string);
+ 
++	DEVID(mhi_device_id);
++	DEVID_FIELD(mhi_device_id, chan);
++
+ 	return 0;
+ }
+diff --git a/scripts/mod/file2alias.c b/scripts/mod/file2alias.c
+index c91eba751804..cae6a4e471b5 100644
+--- a/scripts/mod/file2alias.c
++++ b/scripts/mod/file2alias.c
+@@ -1335,6 +1335,15 @@ static int do_wmi_entry(const char *filename, void *symval, char *alias)
+ 	return 1;
+ }
+ 
++/* Looks like: mhi:S */
++static int do_mhi_entry(const char *filename, void *symval, char *alias)
++{
++	DEF_FIELD_ADDR(symval, mhi_device_id, chan);
++	sprintf(alias, MHI_DEVICE_MODALIAS_FMT, *chan);
++
++	return 1;
++}
++
+ /* Does namelen bytes of name exactly match the symbol? */
+ static bool sym_is(const char *name, unsigned namelen, const char *symbol)
+ {
+@@ -1407,6 +1416,7 @@ static const struct devtable devtable[] = {
+ 	{"typec", SIZE_typec_device_id, do_typec_entry},
+ 	{"tee", SIZE_tee_client_device_id, do_tee_entry},
+ 	{"wmi", SIZE_wmi_device_id, do_wmi_entry},
++	{"mhi", SIZE_mhi_device_id, do_mhi_entry},
+ };
+ 
+ /* Create MODULE_ALIAS() statements.
+-- 
+2.25.1
+

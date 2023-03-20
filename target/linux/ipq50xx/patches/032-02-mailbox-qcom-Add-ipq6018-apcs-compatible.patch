@@ -1,0 +1,46 @@
+From f2a54b4288866c3f18fececa26fb9eabd89ae266 Mon Sep 17 00:00:00 2001
+From: Sivaprakash Murugesan <sivaprak@codeaurora.org>
+Date: Mon, 8 Jun 2020 15:07:27 +0530
+Subject: [PATCH 02/11] mailbox: qcom: Add ipq6018 apcs compatible
+
+The Qualcomm ipq6018 has apcs block, add compatible for the same. Also,
+the ipq6018 apcs provides a clock functionality similar to msm8916 but
+the clock driver is different.
+
+Create a child device based on the apcs compatible for the clock
+controller functionality.
+
+Signed-off-by: Sivaprakash Murugesan <sivaprak@codeaurora.org>
+Signed-off-by: Jassi Brar <jaswinder.singh@linaro.org>
+(cherry picked from commit e9f901dc05c09c4f89183cadcb2d93177f3100cb)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/mailbox/qcom-apcs-ipc-mailbox.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/drivers/mailbox/qcom-apcs-ipc-mailbox.c b/drivers/mailbox/qcom-apcs-ipc-mailbox.c
+index 49eebb5b87bc..cec34f0af6ce 100644
+--- a/drivers/mailbox/qcom-apcs-ipc-mailbox.c
++++ b/drivers/mailbox/qcom-apcs-ipc-mailbox.c
+@@ -29,6 +29,10 @@ struct qcom_apcs_ipc_data {
+ 	char *clk_name;
+ };
+ 
++static const struct qcom_apcs_ipc_data ipq6018_apcs_data = {
++	.offset = 8, .clk_name = "qcom,apss-ipq6018-clk"
++};
++
+ static const struct qcom_apcs_ipc_data ipq8074_apcs_data = {
+ 	.offset = 8, .clk_name = NULL
+ };
+@@ -139,6 +143,7 @@ static int qcom_apcs_ipc_remove(struct platform_device *pdev)
+ 
+ /* .data is the offset of the ipc register within the global block */
+ static const struct of_device_id qcom_apcs_ipc_of_match[] = {
++	{ .compatible = "qcom,ipq6018-apcs-apps-global", .data = &ipq6018_apcs_data },
+ 	{ .compatible = "qcom,ipq8074-apcs-apps-global", .data = &ipq8074_apcs_data },
+ 	{ .compatible = "qcom,msm8916-apcs-kpss-global", .data = &msm8916_apcs_data },
+ 	{ .compatible = "qcom,msm8996-apcs-hmss-global", .data = &msm8996_apcs_data },
+-- 
+2.25.1
+

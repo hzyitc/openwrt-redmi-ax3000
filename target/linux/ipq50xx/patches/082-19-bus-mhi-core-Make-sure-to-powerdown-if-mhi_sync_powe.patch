@@ -1,0 +1,43 @@
+From b4aa998a6e16d0bfddf5a5b10c34381104b90c9f Mon Sep 17 00:00:00 2001
+From: Jeffrey Hugo <jhugo@codeaurora.org>
+Date: Fri, 1 May 2020 00:35:51 +0530
+Subject: [PATCH 19/22] bus: mhi: core: Make sure to powerdown if
+ mhi_sync_power_up fails
+
+Powerdown is necessary if mhi_sync_power_up fails due to a timeout, to
+clean up the resources.  Otherwise a BUG could be triggered when
+attempting to clean up MSIs because the IRQ is still active from a
+request_irq().
+
+Signed-off-by: Jeffrey Hugo <jhugo@codeaurora.org>
+Reviewed-by: Hemant Kumar <hemantk@codeaurora.org>
+Reviewed-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Signed-off-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Link: https://lore.kernel.org/r/20200430190555.32741-3-manivannan.sadhasivam@linaro.org
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+(cherry picked from commit ce312258084ea0c828e11c831c7b9e8b42b02ef8)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/bus/mhi/core/pm.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/bus/mhi/core/pm.c b/drivers/bus/mhi/core/pm.c
+index 3529419d076b..e7c831867a23 100644
+--- a/drivers/bus/mhi/core/pm.c
++++ b/drivers/bus/mhi/core/pm.c
+@@ -1045,7 +1045,11 @@ int mhi_sync_power_up(struct mhi_controller *mhi_cntrl)
+ 			   MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state),
+ 			   msecs_to_jiffies(mhi_cntrl->timeout_ms));
+ 
+-	return (MHI_IN_MISSION_MODE(mhi_cntrl->ee)) ? 0 : -EIO;
++	ret = (MHI_IN_MISSION_MODE(mhi_cntrl->ee)) ? 0 : -ETIMEDOUT;
++	if (ret)
++		mhi_power_down(mhi_cntrl, false);
++
++	return ret;
+ }
+ EXPORT_SYMBOL(mhi_sync_power_up);
+ 
+-- 
+2.25.1
+

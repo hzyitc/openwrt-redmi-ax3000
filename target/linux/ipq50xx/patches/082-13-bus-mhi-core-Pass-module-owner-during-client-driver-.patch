@@ -1,0 +1,92 @@
+From 65bb0a909cd355f2a200b02708020963010c5870 Mon Sep 17 00:00:00 2001
+From: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Date: Tue, 24 Mar 2020 11:40:44 +0530
+Subject: [PATCH 13/22] bus: mhi: core: Pass module owner during client driver
+ registration
+
+The module owner field can be used to prevent the removal of kernel
+modules when there are any device files associated with it opened in
+userspace. Hence, modify the API to pass module owner field. For
+convenience, module_mhi_driver() macro is used which takes care of
+passing the module owner through THIS_MODULE of the module of the
+driver and also avoiding the use of specifying the default MHI client
+driver register/unregister routines.
+
+Suggested-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Signed-off-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Reviewed-by: Bjorn Andersson <bjorn.andersson@linaro.org>
+Link: https://lore.kernel.org/r/20200324061050.14845-2-manivannan.sadhasivam@linaro.org
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+(cherry picked from commit 821747386cb6cd75593a8854208b8af188b4caed)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/bus/mhi/core/init.c |  5 +++--
+ include/linux/mhi.h         | 21 +++++++++++++++++++--
+ 2 files changed, 22 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/bus/mhi/core/init.c b/drivers/bus/mhi/core/init.c
+index 5fb756ca335e..eb7f556a8531 100644
+--- a/drivers/bus/mhi/core/init.c
++++ b/drivers/bus/mhi/core/init.c
+@@ -1189,7 +1189,7 @@ static int mhi_driver_remove(struct device *dev)
+ 	return 0;
+ }
+ 
+-int mhi_driver_register(struct mhi_driver *mhi_drv)
++int __mhi_driver_register(struct mhi_driver *mhi_drv, struct module *owner)
+ {
+ 	struct device_driver *driver = &mhi_drv->driver;
+ 
+@@ -1197,12 +1197,13 @@ int mhi_driver_register(struct mhi_driver *mhi_drv)
+ 		return -EINVAL;
+ 
+ 	driver->bus = &mhi_bus_type;
++	driver->owner = owner;
+ 	driver->probe = mhi_driver_probe;
+ 	driver->remove = mhi_driver_remove;
+ 
+ 	return driver_register(driver);
+ }
+-EXPORT_SYMBOL_GPL(mhi_driver_register);
++EXPORT_SYMBOL_GPL(__mhi_driver_register);
+ 
+ void mhi_driver_unregister(struct mhi_driver *mhi_drv)
+ {
+diff --git a/include/linux/mhi.h b/include/linux/mhi.h
+index 79cb9f898544..d83e7772681b 100644
+--- a/include/linux/mhi.h
++++ b/include/linux/mhi.h
+@@ -514,11 +514,28 @@ int mhi_register_controller(struct mhi_controller *mhi_cntrl,
+  */
+ void mhi_unregister_controller(struct mhi_controller *mhi_cntrl);
+ 
++/*
++ * module_mhi_driver() - Helper macro for drivers that don't do
++ * anything special other than using default mhi_driver_register() and
++ * mhi_driver_unregister().  This eliminates a lot of boilerplate.
++ * Each module may only use this macro once.
++ */
++#define module_mhi_driver(mhi_drv) \
++	module_driver(mhi_drv, mhi_driver_register, \
++		      mhi_driver_unregister)
++
++/*
++ * Macro to avoid include chaining to get THIS_MODULE
++ */
++#define mhi_driver_register(mhi_drv) \
++	__mhi_driver_register(mhi_drv, THIS_MODULE)
++
+ /**
+- * mhi_driver_register - Register driver with MHI framework
++ * __mhi_driver_register - Register driver with MHI framework
+  * @mhi_drv: Driver associated with the device
++ * @owner: The module owner
+  */
+-int mhi_driver_register(struct mhi_driver *mhi_drv);
++int __mhi_driver_register(struct mhi_driver *mhi_drv, struct module *owner);
+ 
+ /**
+  * mhi_driver_unregister - Unregister a driver for mhi_devices
+-- 
+2.25.1
+

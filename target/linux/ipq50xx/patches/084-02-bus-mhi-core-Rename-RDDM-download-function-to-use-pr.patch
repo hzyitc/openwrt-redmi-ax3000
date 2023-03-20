@@ -1,0 +1,64 @@
+From 50bb087ae3635bffc9d1e34aae84d1c65b02d65b Mon Sep 17 00:00:00 2001
+From: Bhaumik Bhatt <bbhatt@codeaurora.org>
+Date: Fri, 6 Nov 2020 09:44:49 -0800
+Subject: [PATCH 2/2] bus: mhi: core: Rename RDDM download function to use
+ proper words
+
+mhi_download_rddm_img() uses a shorter version of the word image.
+Expand it and rename the function to mhi_download_rddm_image().
+
+Signed-off-by: Bhaumik Bhatt <bbhatt@codeaurora.org>
+Reviewed-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Signed-off-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+(cherry picked from commit 9e1660e5c396ee081907386d0b95b8e0804a6c86)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/bus/mhi/core/boot.c | 4 ++--
+ include/linux/mhi.h         | 6 +++---
+ 2 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/bus/mhi/core/boot.c b/drivers/bus/mhi/core/boot.c
+index ebad5eb48e5a..5995132e605d 100644
+--- a/drivers/bus/mhi/core/boot.c
++++ b/drivers/bus/mhi/core/boot.c
+@@ -149,7 +149,7 @@ static int __mhi_download_rddm_in_panic(struct mhi_controller *mhi_cntrl)
+ }
+ 
+ /* Download RDDM image from device */
+-int mhi_download_rddm_img(struct mhi_controller *mhi_cntrl, bool in_panic)
++int mhi_download_rddm_image(struct mhi_controller *mhi_cntrl, bool in_panic)
+ {
+ 	void __iomem *base = mhi_cntrl->bhie;
+ 	u32 rx_status;
+@@ -168,7 +168,7 @@ int mhi_download_rddm_img(struct mhi_controller *mhi_cntrl, bool in_panic)
+ 
+ 	return (rx_status == BHIE_RXVECSTATUS_STATUS_XFER_COMPL) ? 0 : -EIO;
+ }
+-EXPORT_SYMBOL_GPL(mhi_download_rddm_img);
++EXPORT_SYMBOL_GPL(mhi_download_rddm_image);
+ 
+ static int mhi_fw_load_amss(struct mhi_controller *mhi_cntrl,
+ 			    const struct mhi_buf *mhi_buf)
+diff --git a/include/linux/mhi.h b/include/linux/mhi.h
+index b79ea58f1d1d..86649dbd2dc7 100644
+--- a/include/linux/mhi.h
++++ b/include/linux/mhi.h
+@@ -640,12 +640,12 @@ int mhi_pm_suspend(struct mhi_controller *mhi_cntrl);
+ int mhi_pm_resume(struct mhi_controller *mhi_cntrl);
+ 
+ /**
+- * mhi_download_rddm_img - Download ramdump image from device for
+- *                         debugging purpose.
++ * mhi_download_rddm_image - Download ramdump image from device for
++ *                           debugging purpose.
+  * @mhi_cntrl: MHI controller
+  * @in_panic: Download rddm image during kernel panic
+  */
+-int mhi_download_rddm_img(struct mhi_controller *mhi_cntrl, bool in_panic);
++int mhi_download_rddm_image(struct mhi_controller *mhi_cntrl, bool in_panic);
+ 
+ /**
+  * mhi_force_rddm_mode - Force device into rddm mode
+-- 
+2.25.1
+

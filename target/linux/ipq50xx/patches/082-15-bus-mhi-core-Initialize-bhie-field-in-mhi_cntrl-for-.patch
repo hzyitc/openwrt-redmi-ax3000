@@ -1,0 +1,39 @@
+From 2ad174ada5728851b2d505637bfa0e59b7eb21ac Mon Sep 17 00:00:00 2001
+From: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Date: Tue, 24 Mar 2020 11:40:46 +0530
+Subject: [PATCH 15/22] bus: mhi: core: Initialize bhie field in mhi_cntrl for
+ RDDM capture
+
+The bhie field in mhi_cntrl needs to be initialized to proper register
+base in order to make mhi_rddm_prepare() to work. Otherwise,
+mhi_rddm_prepare() will cause NULL pointer dereference.
+
+Fixes: 6fdfdd27328c ("bus: mhi: core: Add support for downloading RDDM image during panic")
+Reported-by: Hemant Kumar <hemantk@codeaurora.org>
+Reviewed-by: Jeffrey Hugo <jhugo@codeaurora.org>
+Signed-off-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Link: https://lore.kernel.org/r/20200324061050.14845-4-manivannan.sadhasivam@linaro.org
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+(cherry picked from commit 93e17a44347acd747a76d63dd9339e48c2c9e308)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/bus/mhi/core/init.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/bus/mhi/core/init.c b/drivers/bus/mhi/core/init.c
+index d136f6c6ca78..f6e3c16225a7 100644
+--- a/drivers/bus/mhi/core/init.c
++++ b/drivers/bus/mhi/core/init.c
+@@ -979,7 +979,8 @@ int mhi_prepare_for_power_up(struct mhi_controller *mhi_cntrl)
+ 			goto bhie_error;
+ 		}
+ 
+-		memset_io(mhi_cntrl->regs + bhie_off + BHIE_RXVECADDR_LOW_OFFS,
++		mhi_cntrl->bhie = mhi_cntrl->regs + bhie_off;
++		memset_io(mhi_cntrl->bhie + BHIE_RXVECADDR_LOW_OFFS,
+ 			  0, BHIE_RXVECSTATUS_OFFS - BHIE_RXVECADDR_LOW_OFFS +
+ 			  4);
+ 
+-- 
+2.25.1
+

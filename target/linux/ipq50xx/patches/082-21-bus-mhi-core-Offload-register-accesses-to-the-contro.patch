@@ -1,0 +1,117 @@
+From 4be4683d626812c8899c55fd4852411ec5a9bd68 Mon Sep 17 00:00:00 2001
+From: Jeffrey Hugo <jhugo@codeaurora.org>
+Date: Fri, 1 May 2020 00:35:53 +0530
+Subject: [PATCH 21/22] bus: mhi: core: Offload register accesses to the
+ controller
+
+When reading or writing MHI registers, the core assumes that the physical
+link is a memory mapped PCI link.  This assumption may not hold for all
+MHI devices.  The controller knows what is the physical link (ie PCI, I2C,
+SPI, etc), and therefore knows the proper methods to access that link.
+The controller can also handle link specific error scenarios, such as
+reading -1 when the PCI link went down.
+
+Therefore, it is appropriate that the MHI core requests the controller to
+make register accesses on behalf of the core, which abstracts the core
+from link specifics, and end up removing an unnecessary assumption.
+
+Signed-off-by: Jeffrey Hugo <jhugo@codeaurora.org>
+Reviewed-by: Hemant Kumar <hemantk@codeaurora.org>
+Reviewed-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Signed-off-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Link: https://lore.kernel.org/r/20200430190555.32741-5-manivannan.sadhasivam@linaro.org
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+(cherry picked from commit 45723a44845c90c8e859fd0e2b0bb492322b5d0b)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/bus/mhi/core/init.c     |  3 ++-
+ drivers/bus/mhi/core/internal.h |  3 ---
+ drivers/bus/mhi/core/main.c     | 12 ++----------
+ include/linux/mhi.h             |  6 ++++++
+ 4 files changed, 10 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/bus/mhi/core/init.c b/drivers/bus/mhi/core/init.c
+index 2af08d57ec28..eb2ab058a01d 100644
+--- a/drivers/bus/mhi/core/init.c
++++ b/drivers/bus/mhi/core/init.c
+@@ -813,7 +813,8 @@ int mhi_register_controller(struct mhi_controller *mhi_cntrl,
+ 		return -EINVAL;
+ 
+ 	if (!mhi_cntrl->runtime_get || !mhi_cntrl->runtime_put ||
+-	    !mhi_cntrl->status_cb)
++	    !mhi_cntrl->status_cb || !mhi_cntrl->read_reg ||
++	    !mhi_cntrl->write_reg)
+ 		return -EINVAL;
+ 
+ 	ret = parse_config(mhi_cntrl, config);
+diff --git a/drivers/bus/mhi/core/internal.h b/drivers/bus/mhi/core/internal.h
+index 5deadfaa053a..095d95bc0e37 100644
+--- a/drivers/bus/mhi/core/internal.h
++++ b/drivers/bus/mhi/core/internal.h
+@@ -11,9 +11,6 @@
+ 
+ extern struct bus_type mhi_bus_type;
+ 
+-/* MHI MMIO register mapping */
+-#define PCI_INVALID_READ(val) (val == U32_MAX)
+-
+ #define MHIREGLEN (0x0)
+ #define MHIREGLEN_MHIREGLEN_MASK (0xFFFFFFFF)
+ #define MHIREGLEN_MHIREGLEN_SHIFT (0)
+diff --git a/drivers/bus/mhi/core/main.c b/drivers/bus/mhi/core/main.c
+index 505840e1f89d..936524065128 100644
+--- a/drivers/bus/mhi/core/main.c
++++ b/drivers/bus/mhi/core/main.c
+@@ -18,15 +18,7 @@
+ int __must_check mhi_read_reg(struct mhi_controller *mhi_cntrl,
+ 			      void __iomem *base, u32 offset, u32 *out)
+ {
+-	u32 tmp = readl(base + offset);
+-
+-	/* If the value is invalid, the link is down */
+-	if (PCI_INVALID_READ(tmp))
+-		return -EIO;
+-
+-	*out = tmp;
+-
+-	return 0;
++	return mhi_cntrl->read_reg(mhi_cntrl, base + offset, out);
+ }
+ 
+ int __must_check mhi_read_reg_field(struct mhi_controller *mhi_cntrl,
+@@ -48,7 +40,7 @@ int __must_check mhi_read_reg_field(struct mhi_controller *mhi_cntrl,
+ void mhi_write_reg(struct mhi_controller *mhi_cntrl, void __iomem *base,
+ 		   u32 offset, u32 val)
+ {
+-	writel(val, base + offset);
++	mhi_cntrl->write_reg(mhi_cntrl, base + offset, val);
+ }
+ 
+ void mhi_write_reg_field(struct mhi_controller *mhi_cntrl, void __iomem *base,
+diff --git a/include/linux/mhi.h b/include/linux/mhi.h
+index c55b399c46bd..e909b8fb8441 100644
+--- a/include/linux/mhi.h
++++ b/include/linux/mhi.h
+@@ -342,6 +342,8 @@ struct mhi_controller_config {
+  * @runtimet_put: CB function to decrement pm usage (required)
+  * @map_single: CB function to create TRE buffer
+  * @unmap_single: CB function to destroy TRE buffer
++ * @read_reg: Read a MHI register via the physical link (required)
++ * @write_reg: Write a MHI register via the physical link (required)
+  * @buffer_len: Bounce buffer length
+  * @bounce_buf: Use of bounce buffer
+  * @fbc_download: MHI host needs to do complete image transfer (optional)
+@@ -425,6 +427,10 @@ struct mhi_controller {
+ 			  struct mhi_buf_info *buf);
+ 	void (*unmap_single)(struct mhi_controller *mhi_cntrl,
+ 			     struct mhi_buf_info *buf);
++	int (*read_reg)(struct mhi_controller *mhi_cntrl, void __iomem *addr,
++			u32 *out);
++	void (*write_reg)(struct mhi_controller *mhi_cntrl, void __iomem *addr,
++			  u32 val);
+ 
+ 	size_t buffer_len;
+ 	bool bounce_buf;
+-- 
+2.25.1
+

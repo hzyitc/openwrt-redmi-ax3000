@@ -1,0 +1,72 @@
+From e23c9bcd4ed92bf79dfc04103b30f1f124c49849 Mon Sep 17 00:00:00 2001
+From: Bjorn Andersson <bjorn.andersson@linaro.org>
+Date: Mon, 23 Mar 2020 22:29:03 -0700
+Subject: [PATCH 2/2] remoteproc: qcom: q6v5: Add common panic handler
+
+Add a common panic handler that invokes a stop request and sleep enough
+to let the remoteproc flush it's caches etc in order to aid post mortem
+debugging. For now a hard coded 200ms is returned to the remoteproc
+core, this value is taken from the downstream kernel.
+
+Reviewed-by: Mathieu Poirier <mathieu.poirier@linaro.org>
+Link: https://lore.kernel.org/r/20200324052904.738594-4-bjorn.andersson@linaro.org
+Signed-off-by: Bjorn Andersson <bjorn.andersson@linaro.org>
+(cherry picked from commit e9142f5c28e997ab45fac23bc27a3bc01725bb49)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/remoteproc/qcom_q6v5.c | 20 ++++++++++++++++++++
+ drivers/remoteproc/qcom_q6v5.h |  1 +
+ 2 files changed, 21 insertions(+)
+
+diff --git a/drivers/remoteproc/qcom_q6v5.c b/drivers/remoteproc/qcom_q6v5.c
+index eaeb6aee6da5..fd6fd36268d9 100644
+--- a/drivers/remoteproc/qcom_q6v5.c
++++ b/drivers/remoteproc/qcom_q6v5.c
+@@ -15,6 +15,8 @@
+ #include <linux/remoteproc.h>
+ #include "qcom_q6v5.h"
+ 
++#define Q6V5_PANIC_DELAY_MS	200
++
+ /**
+  * qcom_q6v5_prepare() - reinitialize the qcom_q6v5 context before start
+  * @q6v5:	reference to qcom_q6v5 context to be reinitialized
+@@ -164,6 +166,24 @@ int qcom_q6v5_request_stop(struct qcom_q6v5 *q6v5)
+ }
+ EXPORT_SYMBOL_GPL(qcom_q6v5_request_stop);
+ 
++/**
++ * qcom_q6v5_panic() - panic handler to invoke a stop on the remote
++ * @q6v5:	reference to qcom_q6v5 context
++ *
++ * Set the stop bit and sleep in order to allow the remote processor to flush
++ * its caches etc for post mortem debugging.
++ *
++ * Return: 200ms
++ */
++unsigned long qcom_q6v5_panic(struct qcom_q6v5 *q6v5)
++{
++	qcom_smem_state_update_bits(q6v5->state,
++				    BIT(q6v5->stop_bit), BIT(q6v5->stop_bit));
++
++	return Q6V5_PANIC_DELAY_MS;
++}
++EXPORT_SYMBOL_GPL(qcom_q6v5_panic);
++
+ /**
+  * qcom_q6v5_init() - initializer of the q6v5 common struct
+  * @q6v5:	handle to be initialized
+diff --git a/drivers/remoteproc/qcom_q6v5.h b/drivers/remoteproc/qcom_q6v5.h
+index 7ac92c1e0f49..c4ed887c1499 100644
+--- a/drivers/remoteproc/qcom_q6v5.h
++++ b/drivers/remoteproc/qcom_q6v5.h
+@@ -42,5 +42,6 @@ int qcom_q6v5_prepare(struct qcom_q6v5 *q6v5);
+ int qcom_q6v5_unprepare(struct qcom_q6v5 *q6v5);
+ int qcom_q6v5_request_stop(struct qcom_q6v5 *q6v5);
+ int qcom_q6v5_wait_for_start(struct qcom_q6v5 *q6v5, int timeout);
++unsigned long qcom_q6v5_panic(struct qcom_q6v5 *q6v5);
+ 
+ #endif
+-- 
+2.25.1
+

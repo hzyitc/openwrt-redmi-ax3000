@@ -1,0 +1,43 @@
+From 85bf155b5d7221b7d3e5844d78bf458f464a9e30 Mon Sep 17 00:00:00 2001
+From: Randy Dunlap <rdunlap@infradead.org>
+Date: Mon, 23 Mar 2020 19:25:05 -0700
+Subject: [PATCH 12/22] bus/mhi: fix printk format for size_t
+
+Fix printk format warning by using %z for size_t modifier:
+
+../drivers/bus/mhi/core/boot.c: In function `mhi_rddm_prepare':
+../drivers/bus/mhi/core/boot.c:55:15: warning: format `%lx' expects argument of type `long unsigned int', but argument 5 has type `size_t {aka unsigned int}' [-Wformat=]
+  dev_dbg(dev, "Address: %p and len: 0x%lx sequence: %u
+",
+
+Link: http://lkml.kernel.org/r/c4852a82-cdb9-6318-70a4-96ccb4ba5af2@infradead.org
+Fixes: 6fdfdd27328ce ("bus: mhi: core: Add support for downloading RDDM image during panic")
+Signed-off-by: Randy Dunlap <rdunlap@infradead.org>
+Acked-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Cc: Hemant Kumar <hemantk@codeaurora.org>
+Cc: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Link: https://lore.kernel.org/r/20200324022505.UiPPJZVXX%akpm@linux-foundation.org
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+(cherry picked from commit 3baf89abca196f6dcb7038fd5342fd6e82f3260c)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/bus/mhi/core/boot.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/bus/mhi/core/boot.c b/drivers/bus/mhi/core/boot.c
+index 220faa886eb3..ebad5eb48e5a 100644
+--- a/drivers/bus/mhi/core/boot.c
++++ b/drivers/bus/mhi/core/boot.c
+@@ -52,7 +52,7 @@ void mhi_rddm_prepare(struct mhi_controller *mhi_cntrl,
+ 			    BHIE_RXVECDB_SEQNUM_BMSK, BHIE_RXVECDB_SEQNUM_SHFT,
+ 			    sequence_id);
+ 
+-	dev_dbg(dev, "Address: %p and len: 0x%lx sequence: %u\n",
++	dev_dbg(dev, "Address: %p and len: 0x%zx sequence: %u\n",
+ 		&mhi_buf->dma_addr, mhi_buf->len, sequence_id);
+ }
+ 
+-- 
+2.25.1
+

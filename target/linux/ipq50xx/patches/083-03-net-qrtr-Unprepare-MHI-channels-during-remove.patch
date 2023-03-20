@@ -1,0 +1,36 @@
+From a8112dc81d18f3501c3827d1353e92260ef5f2b9 Mon Sep 17 00:00:00 2001
+From: Bhaumik Bhatt <bbhatt@codeaurora.org>
+Date: Wed, 18 Nov 2020 10:20:25 -0800
+Subject: [PATCH 3/4] net: qrtr: Unprepare MHI channels during remove
+
+Reset MHI device channels when driver remove is called due to
+module unload or any crash scenario. This will make sure that
+MHI channels no longer remain enabled for transfers since the
+MHI stack does not take care of this anymore after the auto-start
+channels feature was removed.
+
+Signed-off-by: Bhaumik Bhatt <bbhatt@codeaurora.org>
+Acked-by: Jakub Kicinski <kuba@kernel.org>
+Reviewed-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Signed-off-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+(cherry picked from commit 2ca7e30d3b1ee370c96201e58f8c05ba2bdcd6d2)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ net/qrtr/mhi.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/net/qrtr/mhi.c b/net/qrtr/mhi.c
+index 7100f0bac4c6..2bf2b1943e61 100644
+--- a/net/qrtr/mhi.c
++++ b/net/qrtr/mhi.c
+@@ -104,6 +104,7 @@ static void qcom_mhi_qrtr_remove(struct mhi_device *mhi_dev)
+ 	struct qrtr_mhi_dev *qdev = dev_get_drvdata(&mhi_dev->dev);
+ 
+ 	qrtr_endpoint_unregister(&qdev->ep);
++	mhi_unprepare_from_transfer(mhi_dev);
+ 	dev_set_drvdata(&mhi_dev->dev, NULL);
+ }
+ 
+-- 
+2.25.1
+

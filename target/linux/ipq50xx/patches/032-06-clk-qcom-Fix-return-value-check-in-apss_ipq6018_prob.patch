@@ -1,0 +1,39 @@
+From db6651739cbdb566e890c65c6bd0c77f8a121f9d Mon Sep 17 00:00:00 2001
+From: Wei Yongjun <weiyongjun1@huawei.com>
+Date: Sun, 28 Jun 2020 02:30:55 +0000
+Subject: [PATCH 06/11] clk: qcom: Fix return value check in
+ apss_ipq6018_probe()
+
+In case of error, the function dev_get_regmap() returns NULL pointer
+not ERR_PTR(). The IS_ERR() test in the return value check should be
+replaced with NULL test.
+
+Fixes: 5e77b4ef1b19 ("clk: qcom: Add ipq6018 apss clock controller")
+Reported-by: Hulk Robot <hulkci@huawei.com>
+Signed-off-by: Wei Yongjun <weiyongjun1@huawei.com>
+Link: https://lore.kernel.org/r/20200628023055.50608-1-weiyongjun1@huawei.com
+Signed-off-by: Stephen Boyd <sboyd@kernel.org>
+(cherry picked from commit dbb988b4e7eb924ffceaa2a7da6e794c868cb2f3)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/clk/qcom/apss-ipq6018.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/clk/qcom/apss-ipq6018.c b/drivers/clk/qcom/apss-ipq6018.c
+index 004f7e1ecdc2..d78ff2f310bf 100644
+--- a/drivers/clk/qcom/apss-ipq6018.c
++++ b/drivers/clk/qcom/apss-ipq6018.c
+@@ -87,8 +87,8 @@ static int apss_ipq6018_probe(struct platform_device *pdev)
+ 	struct regmap *regmap;
+ 
+ 	regmap = dev_get_regmap(pdev->dev.parent, NULL);
+-	if (IS_ERR(regmap))
+-		return PTR_ERR(regmap);
++	if (!regmap)
++		return -ENODEV;
+ 
+ 	return qcom_cc_really_probe(pdev, &apss_ipq6018_desc, regmap);
+ }
+-- 
+2.25.1
+

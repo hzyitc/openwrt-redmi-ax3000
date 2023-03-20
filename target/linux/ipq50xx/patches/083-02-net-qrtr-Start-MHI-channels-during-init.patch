@@ -1,0 +1,37 @@
+From 5a5a5c525ba5c5d114e9a37aea264eadb00aeba2 Mon Sep 17 00:00:00 2001
+From: Loic Poulain <loic.poulain@linaro.org>
+Date: Mon, 28 Sep 2020 09:39:51 +0530
+Subject: [PATCH 2/4] net: qrtr: Start MHI channels during init
+
+Start MHI device channels so that transfers can be performed.
+The MHI stack does not auto-start channels anymore.
+
+Signed-off-by: Loic Poulain <loic.poulain@linaro.org>
+Reviewed-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Acked-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+(cherry picked from commit a2e2cc0dbb1121dfa875da1c04f3dff966fec162)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ net/qrtr/mhi.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/net/qrtr/mhi.c b/net/qrtr/mhi.c
+index ff0c41467fc1..7100f0bac4c6 100644
+--- a/net/qrtr/mhi.c
++++ b/net/qrtr/mhi.c
+@@ -76,6 +76,11 @@ static int qcom_mhi_qrtr_probe(struct mhi_device *mhi_dev,
+ 	struct qrtr_mhi_dev *qdev;
+ 	int rc;
+ 
++	/* start channels */
++	rc = mhi_prepare_for_transfer(mhi_dev);
++	if (rc)
++		return rc;
++
+ 	qdev = devm_kzalloc(&mhi_dev->dev, sizeof(*qdev), GFP_KERNEL);
+ 	if (!qdev)
+ 		return -ENOMEM;
+-- 
+2.25.1
+

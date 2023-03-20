@@ -1,0 +1,172 @@
+From ae1d0060be6ac98f1640f335b518d86329915c3e Mon Sep 17 00:00:00 2001
+From: "Jason A. Donenfeld" <Jason@zx2c4.com>
+Date: Sat, 8 Oct 2022 20:42:54 -0600
+Subject: [PATCH 2/3] random: use rejection sampling for uniform bounded random
+ integers
+
+Until the very recent commits, many bounded random integers were
+calculated using `get_random_u32() % max_plus_one`, which not only
+incurs the price of a division -- indicating performance mostly was not
+a real issue -- but also does not result in a uniformly distributed
+output if max_plus_one is not a power of two. Recent commits moved to
+using `prandom_u32_max(max_plus_one)`, which replaces the division with
+a faster multiplication, but still does not solve the issue with
+non-uniform output.
+
+For some users, maybe this isn't a problem, and for others, maybe it is,
+but for the majority of users, probably the question has never been
+posed and analyzed, and nobody thought much about it, probably assuming
+random is random is random. In other words, the unthinking expectation
+of most users is likely that the resultant numbers are uniform.
+
+So we implement here an efficient way of generating uniform bounded
+random integers. Through use of compile-time evaluation, and avoiding
+divisions as much as possible, this commit introduces no measurable
+overhead. At least for hot-path uses tested, any potential difference
+was lost in the noise. On both clang and gcc, code generation is pretty
+small.
+
+The new function, get_random_u32_below(), lives in random.h, rather than
+prandom.h, and has a "get_random_xxx" function name, because it is
+suitable for all uses, including cryptography.
+
+In order to be efficient, we implement a kernel-specific variant of
+Daniel Lemire's algorithm from "Fast Random Integer Generation in an
+Interval", linked below. The kernel's variant takes advantage of
+constant folding to avoid divisions entirely in the vast majority of
+cases, works on both 32-bit and 64-bit architectures, and requests a
+minimal amount of bytes from the RNG.
+
+Link: https://arxiv.org/pdf/1805.10941.pdf
+Cc: stable@vger.kernel.org # to ease future backports that use this api
+Signed-off-by: Jason A. Donenfeld <Jason@zx2c4.com>
+(cherry picked from commit e9a688bcb19348862afe30d7c85bc37c4c293471)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/char/random.c   | 22 ++++++++++++++++++++++
+ include/linux/prandom.h | 15 ++-------------
+ include/linux/random.h  | 40 ++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 64 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/char/random.c b/drivers/char/random.c
+index fd48427076d2..41e1b3dbca44 100644
+--- a/drivers/char/random.c
++++ b/drivers/char/random.c
+@@ -199,6 +199,7 @@ static void __cold process_random_ready_list(void)
+  *
+  *	void get_random_bytes(void *buf, size_t len)
+  *	u32 get_random_u32()
++ *	u32 get_random_u32_below(u32 ceil)
+  *	u64 get_random_u64()
+  *	unsigned int get_random_int()
+  *	unsigned long get_random_long()
+@@ -551,6 +552,27 @@ DEFINE_BATCHED_ENTROPY(u32)
+ DEFINE_BATCHED_ENTROPY(u16)
+ DEFINE_BATCHED_ENTROPY(u8)
+ 
++u32 __get_random_u32_below(u32 ceil)
++{
++	/*
++	 * This is the slow path for variable ceil. It is still fast, most of
++	 * the time, by doing traditional reciprocal multiplication and
++	 * opportunistically comparing the lower half to ceil itself, before
++	 * falling back to computing a larger bound, and then rejecting samples
++	 * whose lower half would indicate a range indivisible by ceil. The use
++	 * of `-ceil % ceil` is analogous to `2^32 % ceil`, but is computable
++	 * in 32-bits.
++	 */
++	u64 mult = (u64)ceil * get_random_u32();
++	if (unlikely((u32)mult < ceil)) {
++		u32 bound = -ceil % ceil;
++		while (unlikely((u32)mult < bound))
++			mult = (u64)ceil * get_random_u32();
++	}
++	return mult >> 32;
++}
++EXPORT_SYMBOL(__get_random_u32_below);
++
+ #ifdef CONFIG_SMP
+ /*
+  * This function is called when the CPU is coming up, with entry
+diff --git a/include/linux/prandom.h b/include/linux/prandom.h
+index 709e8e69fb39..8cc9f3e833ea 100644
+--- a/include/linux/prandom.h
++++ b/include/linux/prandom.h
+@@ -52,21 +52,10 @@ void prandom_seed_full_state(struct rnd_state __percpu *pcpu_state);
+ #define prandom_init_once(pcpu_state)			\
+ 	DO_ONCE(prandom_seed_full_state, (pcpu_state))
+ 
+-/**
+- * prandom_u32_max - returns a pseudo-random number in interval [0, ep_ro)
+- * @ep_ro: right open interval endpoint
+- *
+- * Returns a pseudo-random number that is in interval [0, ep_ro). Note
+- * that the result depends on PRNG being well distributed in [0, ~0U]
+- * u32 space. Here we use maximally equidistributed combined Tausworthe
+- * generator, that is, prandom_u32(). This is useful when requesting a
+- * random index of an array containing ep_ro elements, for example.
+- *
+- * Returns: pseudo-random number in interval [0, ep_ro)
+- */
++/* Deprecated: use get_random_u32_below() instead. */
+ static inline u32 prandom_u32_max(u32 ep_ro)
+ {
+-	return (u32)(((u64) prandom_u32() * ep_ro) >> 32);
++	return get_random_u32_below(ep_ro);
+ }
+ 
+ /*
+diff --git a/include/linux/random.h b/include/linux/random.h
+index dfdf3e4fd168..249801f007a6 100644
+--- a/include/linux/random.h
++++ b/include/linux/random.h
+@@ -47,6 +47,46 @@ static inline unsigned long get_random_long(void)
+ #endif
+ }
+ 
++u32 __get_random_u32_below(u32 ceil);
++
++/*
++ * Returns a random integer in the interval [0, ceil), with uniform
++ * distribution, suitable for all uses. Fastest when ceil is a constant, but
++ * still fast for variable ceil as well.
++ */
++static inline u32 get_random_u32_below(u32 ceil)
++{
++	if (!__builtin_constant_p(ceil))
++		return __get_random_u32_below(ceil);
++
++	/*
++	 * For the fast path, below, all operations on ceil are precomputed by
++	 * the compiler, so this incurs no overhead for checking pow2, doing
++	 * divisions, or branching based on integer size. The resultant
++	 * algorithm does traditional reciprocal multiplication (typically
++	 * optimized by the compiler into shifts and adds), rejecting samples
++	 * whose lower half would indicate a range indivisible by ceil.
++	 */
++	BUILD_BUG_ON_MSG(!ceil, "get_random_u32_below() must take ceil > 0");
++	if (ceil <= 1)
++		return 0;
++	for (;;) {
++		if (ceil <= 1U << 8) {
++			u32 mult = ceil * get_random_u8();
++			if (likely(is_power_of_2(ceil) || (u8)mult >= (1U << 8) % ceil))
++				return mult >> 8;
++		} else if (ceil <= 1U << 16) {
++			u32 mult = ceil * get_random_u16();
++			if (likely(is_power_of_2(ceil) || (u16)mult >= (1U << 16) % ceil))
++				return mult >> 16;
++		} else {
++			u64 mult = (u64)ceil * get_random_u32();
++			if (likely(is_power_of_2(ceil) || (u32)mult >= -ceil % ceil))
++				return mult >> 32;
++		}
++	}
++}
++
+ /*
+  * On 64-bit architectures, protect against non-terminated C string overflows
+  * by zeroing out the first byte of the canary; this leaves 56 bits of entropy.
+-- 
+2.25.1
+
