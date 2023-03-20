@@ -1,0 +1,4 @@
+// SPDX-License-Identifier: (GPL-2.0+)
+
+#include "../../../arm64/boot/dts/qcom/ipq5000-ax3000.dts"
+#include "qcom-ipq5018.dtsi"
