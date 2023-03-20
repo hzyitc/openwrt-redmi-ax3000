@@ -1,0 +1,181 @@
+From ef44923766154525ebd59d6b2124bdaafec28878 Mon Sep 17 00:00:00 2001
+From: Robert Marko <robert.marko@sartura.hr>
+Date: Tue, 22 Sep 2020 12:16:32 +0200
+Subject: [PATCH 3/5] net: mdio-ipq4019: add Clause 45 support
+
+While up-streaming the IPQ4019 driver it was thought that the controller had no Clause 45 support,
+but it actually does and its activated by writing a bit to the mode register.
+
+So lets add it as newer SoC-s use the same controller and Clause 45 compliant PHY-s.
+
+Signed-off-by: Robert Marko <robert.marko@sartura.hr>
+Cc: Luka Perkov <luka.perkov@sartura.hr>
+Reviewed-by: Andrew Lunn <andrew@lunn.ch>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+(cherry picked from commit 06fb560602a42246910e410d24dcb48c91b652ad)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/net/phy/mdio-ipq4019.c | 103 ++++++++++++++++++++++++++++-----
+ 1 file changed, 89 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/net/phy/mdio-ipq4019.c b/drivers/net/phy/mdio-ipq4019.c
+index 64b169e5a699..25c25ea6da66 100644
+--- a/drivers/net/phy/mdio-ipq4019.c
++++ b/drivers/net/phy/mdio-ipq4019.c
+@@ -12,6 +12,7 @@
+ #include <linux/phy.h>
+ #include <linux/platform_device.h>
+ 
++#define MDIO_MODE_REG				0x40
+ #define MDIO_ADDR_REG				0x44
+ #define MDIO_DATA_WRITE_REG			0x48
+ #define MDIO_DATA_READ_REG			0x4c
+@@ -20,6 +21,12 @@
+ #define MDIO_CMD_ACCESS_START		BIT(8)
+ #define MDIO_CMD_ACCESS_CODE_READ	0
+ #define MDIO_CMD_ACCESS_CODE_WRITE	1
++#define MDIO_CMD_ACCESS_CODE_C45_ADDR	0
++#define MDIO_CMD_ACCESS_CODE_C45_WRITE	1
++#define MDIO_CMD_ACCESS_CODE_C45_READ	2
++
++/* 0 = Clause 22, 1 = Clause 45 */
++#define MDIO_MODE_C45				BIT(8)
+ 
+ #define IPQ4019_MDIO_TIMEOUT	10000
+ #define IPQ4019_MDIO_SLEEP		10
+@@ -41,19 +48,44 @@ static int ipq4019_mdio_wait_busy(struct mii_bus *bus)
+ static int ipq4019_mdio_read(struct mii_bus *bus, int mii_id, int regnum)
+ {
+ 	struct ipq4019_mdio_data *priv = bus->priv;
++	unsigned int data;
+ 	unsigned int cmd;
+ 
+-	/* Reject clause 45 */
+-	if (regnum & MII_ADDR_C45)
+-		return -EOPNOTSUPP;
+-
+ 	if (ipq4019_mdio_wait_busy(bus))
+ 		return -ETIMEDOUT;
+ 
+-	/* issue the phy address and reg */
+-	writel((mii_id << 8) | regnum, priv->membase + MDIO_ADDR_REG);
++	/* Clause 45 support */
++	if (regnum & MII_ADDR_C45) {
++		unsigned int mmd = (regnum >> 16) & 0x1F;
++		unsigned int reg = regnum & 0xFFFF;
++
++		/* Enter Clause 45 mode */
++		data = readl(priv->membase + MDIO_MODE_REG);
++
++		data |= MDIO_MODE_C45;
++
++		writel(data, priv->membase + MDIO_MODE_REG);
++
++		/* issue the phy address and mmd */
++		writel((mii_id << 8) | mmd, priv->membase + MDIO_ADDR_REG);
++
++		/* issue reg */
++		writel(reg, priv->membase + MDIO_DATA_WRITE_REG);
++
++		cmd = MDIO_CMD_ACCESS_START | MDIO_CMD_ACCESS_CODE_C45_ADDR;
++	} else {
++		/* Enter Clause 22 mode */
++		data = readl(priv->membase + MDIO_MODE_REG);
+ 
+-	cmd = MDIO_CMD_ACCESS_START | MDIO_CMD_ACCESS_CODE_READ;
++		data &= ~MDIO_MODE_C45;
++
++		writel(data, priv->membase + MDIO_MODE_REG);
++
++		/* issue the phy address and reg */
++		writel((mii_id << 8) | regnum, priv->membase + MDIO_ADDR_REG);
++
++		cmd = MDIO_CMD_ACCESS_START | MDIO_CMD_ACCESS_CODE_READ;
++	}
+ 
+ 	/* issue read command */
+ 	writel(cmd, priv->membase + MDIO_CMD_REG);
+@@ -62,6 +94,15 @@ static int ipq4019_mdio_read(struct mii_bus *bus, int mii_id, int regnum)
+ 	if (ipq4019_mdio_wait_busy(bus))
+ 		return -ETIMEDOUT;
+ 
++	if (regnum & MII_ADDR_C45) {
++		cmd = MDIO_CMD_ACCESS_START | MDIO_CMD_ACCESS_CODE_C45_READ;
++
++		writel(cmd, priv->membase + MDIO_CMD_REG);
++
++		if (ipq4019_mdio_wait_busy(bus))
++			return -ETIMEDOUT;
++	}
++
+ 	/* Read and return data */
+ 	return readl(priv->membase + MDIO_DATA_READ_REG);
+ }
+@@ -70,23 +111,57 @@ static int ipq4019_mdio_write(struct mii_bus *bus, int mii_id, int regnum,
+ 							 u16 value)
+ {
+ 	struct ipq4019_mdio_data *priv = bus->priv;
++	unsigned int data;
+ 	unsigned int cmd;
+ 
+-	/* Reject clause 45 */
+-	if (regnum & MII_ADDR_C45)
+-		return -EOPNOTSUPP;
+-
+ 	if (ipq4019_mdio_wait_busy(bus))
+ 		return -ETIMEDOUT;
+ 
+-	/* issue the phy address and reg */
+-	writel((mii_id << 8) | regnum, priv->membase + MDIO_ADDR_REG);
++	/* Clause 45 support */
++	if (regnum & MII_ADDR_C45) {
++		unsigned int mmd = (regnum >> 16) & 0x1F;
++		unsigned int reg = regnum & 0xFFFF;
++
++		/* Enter Clause 45 mode */
++		data = readl(priv->membase + MDIO_MODE_REG);
++
++		data |= MDIO_MODE_C45;
++
++		writel(data, priv->membase + MDIO_MODE_REG);
++
++		/* issue the phy address and mmd */
++		writel((mii_id << 8) | mmd, priv->membase + MDIO_ADDR_REG);
++
++		/* issue reg */
++		writel(reg, priv->membase + MDIO_DATA_WRITE_REG);
++
++		cmd = MDIO_CMD_ACCESS_START | MDIO_CMD_ACCESS_CODE_C45_ADDR;
++
++		writel(cmd, priv->membase + MDIO_CMD_REG);
++
++		if (ipq4019_mdio_wait_busy(bus))
++			return -ETIMEDOUT;
++	} else {
++		/* Enter Clause 22 mode */
++		data = readl(priv->membase + MDIO_MODE_REG);
++
++		data &= ~MDIO_MODE_C45;
++
++		writel(data, priv->membase + MDIO_MODE_REG);
++
++		/* issue the phy address and reg */
++		writel((mii_id << 8) | regnum, priv->membase + MDIO_ADDR_REG);
++	}
+ 
+ 	/* issue write data */
+ 	writel(value, priv->membase + MDIO_DATA_WRITE_REG);
+ 
+-	cmd = MDIO_CMD_ACCESS_START | MDIO_CMD_ACCESS_CODE_WRITE;
+ 	/* issue write command */
++	if (regnum & MII_ADDR_C45)
++		cmd = MDIO_CMD_ACCESS_START | MDIO_CMD_ACCESS_CODE_C45_WRITE;
++	else
++		cmd = MDIO_CMD_ACCESS_START | MDIO_CMD_ACCESS_CODE_WRITE;
++
+ 	writel(cmd, priv->membase + MDIO_CMD_REG);
+ 
+ 	/* Wait write complete */
+-- 
+2.25.1
+

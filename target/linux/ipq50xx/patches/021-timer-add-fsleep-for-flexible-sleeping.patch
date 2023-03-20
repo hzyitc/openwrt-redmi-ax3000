@@ -1,0 +1,61 @@
+From ab2dcf29b31b75852fdddfcea9638c0c19cb70a9 Mon Sep 17 00:00:00 2001
+From: Heiner Kallweit <hkallweit1@gmail.com>
+Date: Fri, 1 May 2020 23:27:21 +0200
+Subject: [PATCH 1/1] timer: add fsleep for flexible sleeping
+
+Sleeping for a certain amount of time requires use of different
+functions, depending on the time period.
+Documentation/timers/timers-howto.rst explains when to use which
+function, and also checkpatch checks for some potentially
+problematic cases.
+
+So let's create a helper that automatically chooses the appropriate
+sleep function -> fsleep(), for flexible sleeping
+
+If the delay is a constant, then the compiler should be able to ensure
+that the new helper doesn't create overhead. If the delay is not
+constant, then the new helper can save some code.
+
+Signed-off-by: Heiner Kallweit <hkallweit1@gmail.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+(cherry picked from commit c6af13d334759c33c14b6fad4c676c6d1dbf9564)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ Documentation/timers/timers-howto.rst |  3 +++
+ include/linux/delay.h                 | 11 +++++++++++
+ 2 files changed, 14 insertions(+)
+
+diff --git a/Documentation/timers/timers-howto.rst b/Documentation/timers/timers-howto.rst
+index 7e3167bec2b1..afb0a43b8cdf 100644
+--- a/Documentation/timers/timers-howto.rst
++++ b/Documentation/timers/timers-howto.rst
+@@ -110,3 +110,6 @@ NON-ATOMIC CONTEXT:
+ 			short, the difference is whether the sleep can be ended
+ 			early by a signal. In general, just use msleep unless
+ 			you know you have a need for the interruptible variant.
++
++	FLEXIBLE SLEEPING (any delay, uninterruptible)
++		* Use fsleep
+diff --git a/include/linux/delay.h b/include/linux/delay.h
+index 8e6828094c1e..5e016a4029d9 100644
+--- a/include/linux/delay.h
++++ b/include/linux/delay.h
+@@ -65,4 +65,15 @@ static inline void ssleep(unsigned int seconds)
+ 	msleep(seconds * 1000);
+ }
+ 
++/* see Documentation/timers/timers-howto.rst for the thresholds */
++static inline void fsleep(unsigned long usecs)
++{
++	if (usecs <= 10)
++		udelay(usecs);
++	else if (usecs <= 20000)
++		usleep_range(usecs, 2 * usecs);
++	else
++		msleep(DIV_ROUND_UP(usecs, 1000));
++}
++
+ #endif /* defined(_LINUX_DELAY_H) */
+-- 
+2.25.1
+

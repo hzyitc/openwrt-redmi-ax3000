@@ -14,6 +14,7 @@ include $(INCLUDE_DIR)/target.mk
 KERNELNAME:=Image dtbs
 
 DEFAULT_PACKAGES += \
-	uboot-envtools
+	uboot-envtools \
+	kmod-qca-nss-dp swconfig
 
 $(eval $(call BuildTarget))

@@ -1,0 +1,26 @@
+From 70d9436e4019dd9eddb664d53ee85cb87a0d8772 Mon Sep 17 00:00:00 2001
+From: hzy <hzyitc@outlook.com>
+Date: Thu, 9 Mar 2023 15:14:20 +0000
+Subject: [PATCH 1/4] Remove uncessary header file
+
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ src/init/ssdk_clk.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/init/ssdk_clk.c b/src/init/ssdk_clk.c
+index ee9fbdda..b419f906 100755
+--- a/src/init/ssdk_clk.c
++++ b/src/init/ssdk_clk.c
+@@ -31,7 +31,7 @@
+ #include <linux/clk-provider.h>
+ #include <linux/clkdev.h>
+ #endif
+-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0))
++#if defined(APPE) && (LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0))
+ #include <soc/qcom/socinfo.h>
+ #endif
+ 
+-- 
+2.25.1
+

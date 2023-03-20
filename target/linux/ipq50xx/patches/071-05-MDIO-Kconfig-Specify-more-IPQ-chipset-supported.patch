@@ -1,0 +1,49 @@
+From 60955969a2d98668445dc14e80be3b64c248d2bb Mon Sep 17 00:00:00 2001
+From: Luo Jie <luoj@codeaurora.org>
+Date: Thu, 12 Aug 2021 18:06:41 +0800
+Subject: [PATCH 5/5] MDIO: Kconfig: Specify more IPQ chipset supported
+
+The IPQ MDIO driver currently supports the chipset IPQ40xx, IPQ807x,
+IPQ60xx and IPQ50xx.
+
+Add the compatible 'qcom,ipq5018-mdio' because of ethernet LDO dedicated
+to the IPQ5018 platform.
+
+Signed-off-by: Luo Jie <luoj@codeaurora.org>
+Reviewed-by: Andrew Lunn <andrew@lunn.ch>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+(cherry picked from commit c76ee26306b2b6ba66540fc4a49a70f427b07a82)
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/net/phy/Kconfig        | 2 +-
+ drivers/net/phy/mdio-ipq4019.c | 1 +
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/phy/Kconfig b/drivers/net/phy/Kconfig
+index 6422d53ecc4a..e3b0122a0c9e 100644
+--- a/drivers/net/phy/Kconfig
++++ b/drivers/net/phy/Kconfig
+@@ -162,7 +162,7 @@ config MDIO_IPQ4019
+ 	depends on COMMON_CLK
+ 	help
+ 	  This driver supports the MDIO interface found in Qualcomm
+-	  IPQ40xx series Soc-s.
++	  IPQ40xx, IPQ60xx, IPQ807x and IPQ50xx series Soc-s.
+ 
+ config MDIO_MOXART
+ 	tristate "MOXA ART MDIO interface support"
+diff --git a/drivers/net/phy/mdio-ipq4019.c b/drivers/net/phy/mdio-ipq4019.c
+index 5f327d362ff7..7227917755cc 100644
+--- a/drivers/net/phy/mdio-ipq4019.c
++++ b/drivers/net/phy/mdio-ipq4019.c
+@@ -258,6 +258,7 @@ static int ipq4019_mdio_remove(struct platform_device *pdev)
+ 
+ static const struct of_device_id ipq4019_mdio_dt_ids[] = {
+ 	{ .compatible = "qcom,ipq4019-mdio" },
++	{ .compatible = "qcom,ipq5018-mdio" },
+ 	{ }
+ };
+ MODULE_DEVICE_TABLE(of, ipq4019_mdio_dt_ids);
+-- 
+2.25.1
+

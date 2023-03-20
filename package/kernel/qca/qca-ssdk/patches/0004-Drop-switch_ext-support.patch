@@ -1,0 +1,44 @@
+From 0d11c6be51766f6603bbf659881b98a6572b275a Mon Sep 17 00:00:00 2001
+From: hzy <hzyitc@outlook.com>
+Date: Sat, 13 May 2023 17:23:46 +0000
+Subject: [PATCH 4/4] Drop switch_ext support
+
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ src/init/ssdk_init.c | 6 ------
+ src/ref/Makefile     | 2 +-
+ 2 files changed, 1 insertion(+), 7 deletions(-)
+
+diff --git a/src/init/ssdk_init.c b/src/init/ssdk_init.c
+index 0d7cac41..3626ac10 100755
+--- a/src/init/ssdk_init.c
++++ b/src/init/ssdk_init.c
+@@ -1150,12 +1150,6 @@ static struct switch_attr qca_ar8327_globals[] = {
+ 		.get = qca_ar8327_sw_atu_dump,
+ 	},
+ #endif
+-	{
+-		.name = "switch_ext",
+-		.description = "Switch extended configuration",
+-		.type = SWITCH_TYPE_EXT,
+-		.set = qca_ar8327_sw_switch_ext,
+-	},
+ };
+ 
+ static struct switch_attr qca_ar8327_port[] = {
+diff --git a/src/ref/Makefile b/src/ref/Makefile
+index ac1a0c2a..f9e6840a 100755
+--- a/src/ref/Makefile
++++ b/src/ref/Makefile
+@@ -3,7 +3,7 @@ LIB=REF
+ 
+ include $(PRJ_PATH)/make/config.mk
+ 
+-SRC_LIST_TMP=ref_uci.c
++SRC_LIST_TMP=
+ SRC_SW_LIST=ref_misc.c ref_uci.c
+ 
+ ifeq (TRUE, $(IN_FDB))
+-- 
+2.25.1
+

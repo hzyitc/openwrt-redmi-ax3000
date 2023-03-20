@@ -1,0 +1,27 @@
+From 0582c743f025ae695b39bd0f765b6a36e9b2a7a3 Mon Sep 17 00:00:00 2001
+From: hzy <hzyitc@outlook.com>
+Date: Sat, 13 May 2023 17:06:26 +0000
+Subject: [PATCH 3/4] Only define parse_uci_option for HPPE
+
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ include/ref/ref_uci.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/include/ref/ref_uci.h b/include/ref/ref_uci.h
+index a42ea153..7767c787 100755
+--- a/include/ref/ref_uci.h
++++ b/include/ref/ref_uci.h
+@@ -27,7 +27,9 @@ qca_ar8327_sw_switch_ext(struct switch_dev *dev,
+ 			 	struct switch_val *val);
+ #endif
+ 
++#if defined(HPPE)
+ int parse_uci_option(struct switch_val *val, const char *option_names[], const int length);
++#endif
+ 
+ #if defined(IN_TUNNEL)
+ int parse_tunnel_udfprofileentry(a_uint32_t dev_id, struct switch_val *val);
+-- 
+2.25.1
+
