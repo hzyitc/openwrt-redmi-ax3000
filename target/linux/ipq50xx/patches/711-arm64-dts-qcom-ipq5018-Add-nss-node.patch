@@ -1,0 +1,105 @@
+From 519dda68c9e46aa74e7bcba82f6bb7c8adbd1a6b Mon Sep 17 00:00:00 2001
+From: hzy <hzyitc@outlook.com>
+Date: Sat, 11 Mar 2023 09:36:54 +0000
+Subject: [PATCH 1/1] arm64: dts: qcom: ipq5018: Add nss node
+
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ arch/arm64/boot/dts/qcom/ipq5018.dtsi | 75 +++++++++++++++++++++++++++
+ 1 file changed, 75 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/ipq5018.dtsi b/arch/arm64/boot/dts/qcom/ipq5018.dtsi
+index b06e67e52f7b..b3faf35ac25d 100644
+--- a/arch/arm64/boot/dts/qcom/ipq5018.dtsi
++++ b/arch/arm64/boot/dts/qcom/ipq5018.dtsi
+@@ -77,6 +77,11 @@
+ 		#size-cells = <2>;
+ 		ranges;
+ 
++		nss@40000000 {
++			reg = <0x0 0x40000000 0x0 0x0800000>;
++			no-map;
++		};
++
+ 		tz: tz@4ac00000 {
+ 			reg = <0x0 0x4ac00000 0x0 0x00400000>;
+ 			no-map;
+@@ -342,5 +347,75 @@
+ 					      "gephy_misc_rst";
+ 			};
+ 		};
++
++		nss-common {
++			compatible = "qcom,nss-common";
++			reg = <0x01868010 0x01>;
++			reg-names = "nss-misc-reset";
++		};
++
++		nss0: nss@40000000 {
++			compatible = "qcom,nss";
++			reg = <0x07a00000 0x100>, <0x0b111000 0x1000>;
++			reg-names = "nphys", "qgic-phys";
++			interrupts = <GIC_SPI 402 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 401 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 400 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 399 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 398 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 397 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 396 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 395 IRQ_TYPE_EDGE_RISING>;
++			clocks = <&gcc GCC_UBI0_CFG_CLK>,
++				 <&gcc GCC_UBI0_DBG_CLK>,
++				 <&gcc GCC_UBI0_CORE_CLK>,
++				 <&gcc GCC_UBI0_UTCM_CLK>,
++				 <&gcc GCC_UBI0_AXI_CLK>,
++				 <&gcc GCC_SNOC_UBI0_AXI_CLK>,
++				 <&gcc GCC_UBI0_NC_AXI_CLK>;
++			clock-names = "nss-cfg-clk",
++				      "nss-dbg-clk",
++				      "nss-core-clk",
++				      "nss-utcm-clk",
++				      "nss-axi-clk",
++				      "nss-snoc-axi-clk",
++				      "nss-nc-axi-clk";
++
++			qcom,id = <0>;
++			qcom,num-queue = <4>;
++			qcom,num-irq = <8>;
++			qcom,num-pri = <4>;
++			qcom,load-addr = <0x40000000>;
++
++			qcom,low-frequency = <850000000>;
++			qcom,mid-frequency = <850000000>;
++			qcom,max-frequency = <1000000000>;
++
++			qcom,ipv4-enabled;
++			qcom,ipv4-reasm-enabled;
++			qcom,ipv6-enabled;
++			qcom,ipv6-reasm-enabled;
++			qcom,tun6rd-enabled;
++			qcom,l2tpv2-enabled;
++			qcom,gre-enabled;
++			qcom,map-t-enabled;
++			qcom,pppoe-enabled;
++			qcom,pptp-enabled;
++			qcom,tunipip6-enabled;
++			qcom,shaping-enabled;
++			qcom,clmap-enabled;
++			qcom,vxlan-enabled;
++			qcom,match-enabled;
++			qcom,mirror-enabled;
++			qcom,crypto-enabled;
++			qcom,ipsec-enabled;
++			qcom,wlanredirect-enabled;
++			qcom,gre-redir-enabled;
++			qcom,gre-redir-mark-enabled;
++			qcom,portid-enabled;
++			qcom,wlan-dataplane-offload-enabled;
++			qcom,pvxlan-enabled;
++			qcom,udp-st-enabled;
++		};
+ 	};
+ };
+-- 
+2.25.1
+

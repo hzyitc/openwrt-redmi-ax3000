@@ -1,0 +1,61 @@
+From 8b5dda587817634f590b01b822988c0d9de441fb Mon Sep 17 00:00:00 2001
+From: Vandhiadevan Karunamoorthy <vkarunam@codeaurora.org>
+Date: Tue, 8 Jun 2021 22:59:24 +0530
+Subject: [PATCH 2/2] clk: qcom: ipq5018: Flag the HW controlled rcg's
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+For hardware controlled RCG’s, clock is forced on during update
+process and goes back to off status once switch is completed.
+So this is needed to skip the check for update bit
+
+Change-Id: I6fc7591bd5e80727c2d9c856d6e67dbb2678ffb0
+Signed-off-by: Vandhiadevan Karunamoorthy <vkarunam@codeaurora.org>
+
+Pick from https://git.codelinaro.org/clo/qsdk/oss/kernel/linux-ipq-5.4/-/commit/05f61fe5d3ed2c11be1267262e46bcef1f8ff4d0
+
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/clk/qcom/gcc-ipq5018.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/drivers/clk/qcom/gcc-ipq5018.c b/drivers/clk/qcom/gcc-ipq5018.c
+index 2f6672d0d844..50b2014e11d7 100644
+--- a/drivers/clk/qcom/gcc-ipq5018.c
++++ b/drivers/clk/qcom/gcc-ipq5018.c
+@@ -461,6 +461,7 @@ static struct clk_rcg2 apss_ahb_clk_src = {
+ 	.hid_width = 5,
+ 	.freq_tbl = ftbl_apss_ahb_clk_src,
+ 	.parent_map = gcc_xo_gpll0_gpll0_out_main_div2_map,
++	.flags = CLK_RCG2_HW_CONTROLLED,
+ 	.clkr.hw.init = &(struct clk_init_data){
+ 		.name = "apss_ahb_clk_src",
+ 		.parent_names = gcc_xo_gpll0_gpll0_out_main_div2,
+@@ -1019,6 +1020,7 @@ static struct clk_rcg2 pcnoc_bfdcd_clk_src = {
+ 	.freq_tbl = ftbl_pcnoc_bfdcd_clk_src,
+ 	.hid_width = 5,
+ 	.parent_map = gcc_xo_gpll0_gpll0_out_main_div2_map,
++	.flags = CLK_RCG2_HW_CONTROLLED,
+ 	.clkr.hw.init = &(struct clk_init_data){
+ 		.name = "pcnoc_bfdcd_clk_src",
+ 		.parent_names = gcc_xo_gpll0_gpll0_out_main_div2,
+@@ -1212,6 +1214,7 @@ static struct clk_rcg2 system_noc_bfdcd_clk_src = {
+ 	.freq_tbl = ftbl_system_noc_bfdcd_clk_src,
+ 	.hid_width = 5,
+ 	.parent_map = gcc_xo_gpll0_gpll2_gpll0_out_main_div2_map,
++	.flags = CLK_RCG2_HW_CONTROLLED,
+ 	.clkr.hw.init = &(struct clk_init_data){
+ 		.name = "system_noc_bfdcd_clk_src",
+ 		.parent_names = gcc_xo_gpll0_gpll2_gpll0_out_main_div2,
+@@ -1259,6 +1262,7 @@ static struct clk_rcg2 ubi0_core_clk_src = {
+ 	.freq_tbl = ftbl_ubi0_core_clk_src,
+ 	.hid_width = 5,
+ 	.parent_map = gcc_xo_ubi32_gpll0_map,
++	.flags = CLK_RCG2_HW_CONTROLLED,
+ 	.clkr.hw.init = &(struct clk_init_data){
+ 		.name = "ubi0_core_clk_src",
+ 		.parent_names = gcc_xo_ubi32_gpll0,
+-- 
+2.25.1
+

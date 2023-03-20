@@ -15,6 +15,7 @@ KERNELNAME:=Image dtbs
 
 DEFAULT_PACKAGES += \
 	uboot-envtools \
-	kmod-qca-nss-dp swconfig
+	kmod-qca-nss-dp swconfig \
+	kmod-qca-nss-drv qca-nss-fw-ipq50xx-retail
 
 $(eval $(call BuildTarget))
