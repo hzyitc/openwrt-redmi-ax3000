@@ -1,0 +1,50 @@
+From d0d47ebfa540934a12c4d3e8ca995e60d5f60760 Mon Sep 17 00:00:00 2001
+From: Wen Gong <quic_wgong@quicinc.com>
+Date: Tue, 2 Nov 2021 12:50:40 +0530
+Subject: [PATCH] mac80211: add parse regulatory info in 6 GHz operation
+ information
+
+This patch is to convert the regulatory info subfield in HE operation
+element to power type and save in struct cfg80211_chan_def.
+
+Signed-off-by: Wen Gong <quic_wgong@quicinc.com>
+Signed-off-by: Aditya Kumar Singh <quic_adisi@quicinc.com>
+---
+ net/mac80211/util.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/net/mac80211/util.c b/net/mac80211/util.c
+index 8ba7e75..9c58109 100644
+--- a/net/mac80211/util.c
++++ b/net/mac80211/util.c
+@@ -3363,6 +3363,7 @@ bool ieee80211_chandef_he_6ghz_oper(struct ieee80211_sub_if_data *sdata,
+ 	const struct ieee80211_sta_he_cap *he_cap;
+ 	struct cfg80211_chan_def he_chandef = *chandef;
+ 	const struct ieee80211_he_6ghz_oper *he_6ghz_oper;
++	struct ieee80211_bss_conf *bss_conf = &sdata->vif.bss_conf;
+ 	bool support_80_80, support_160;
+ 	u8 he_phy_cap;
+ 	u32 freq;
+@@ -3407,6 +3408,19 @@ bool ieee80211_chandef_he_6ghz_oper(struct ieee80211_sub_if_data *sdata,
+ 	he_chandef.chan = ieee80211_get_channel(sdata->local->hw.wiphy, freq);
+ 
+ 	switch (u8_get_bits(he_6ghz_oper->control,
++			    IEEE80211_HE_6GHZ_OPER_CTRL_REG_INFO)) {
++	case IEEE80211_6GHZ_CTRL_REG_LPI_AP:
++		bss_conf->power_type = IEEE80211_REG_LPI_AP;
++		break;
++	case IEEE80211_6GHZ_CTRL_REG_SP_AP:
++		bss_conf->power_type = IEEE80211_REG_SP_AP;
++		break;
++	default:
++		bss_conf->power_type = IEEE80211_REG_UNSET_AP;
++		break;
++	}
++
++	switch (u8_get_bits(he_6ghz_oper->control,
+ 			    IEEE80211_HE_6GHZ_OPER_CTRL_CHANWIDTH)) {
+ 	case IEEE80211_HE_6GHZ_OPER_CTRL_CHANWIDTH_20MHZ:
+ 		he_chandef.width = NL80211_CHAN_WIDTH_20;
+-- 
+2.7.4
+

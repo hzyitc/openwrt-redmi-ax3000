@@ -1,0 +1,452 @@
+From 6d642b1f6247e609ca44ce8b1f81d877a23acaa2 Mon Sep 17 00:00:00 2001
+From: Hari Chandrakanthan <quic_haric@quicinc.com>
+Date: Thu, 11 Nov 2021 18:32:21 +0530
+Subject: [PATCH] ath11k: Add support to threeway coex
+
+Threeway coex - coexistence of WiFi 802.11ax, BT/BLE, and Thread(802.15.4)
+Debugfs support for setting threeway coexistence priority is added.
+Support for bt coex stats through wmi ctrl stats is added.
+
+cmd to set priority :
+echo 1 0xP1 0xP2 0xP3 > /sys/kernel/debug/ieee80211/phyX/ath11k/coex_priority
+P1 - priority1, P2 - priority2, P3 - priority3
+
+cmd to reset priority :
+echo 0 > /sys/kernel/debug/ieee80211/phyX/ath11k/coex_priority
+
+cmd to enable btcoex stats :
+echo 1 -1 -1 > /sys/kernel/debug/ath11k/ipq5018\ hw1.0/mac0/btcoex
+
+cmd to set wmi ctrl stats type as btcoex stats :
+echo 8 1 > /sys/kernel/debug/ieee80211/phyX/netdev:wlanX/wmi_ctr
+l_stats
+
+cmd to view bt coex stats :
+cat /sys/kernel/debug/ieee80211/phyX/netdev:wlanX/wmi_ctrl_stats
+
+Signed-off-by: Hari Chandrakanthan <quic_haric@quicinc.com>
+---
+ drivers/net/wireless/ath/ath11k/core.h    |   3 +
+ drivers/net/wireless/ath/ath11k/debugfs.c | 154 ++++++++++++++++++++++++++++++
+ drivers/net/wireless/ath/ath11k/wmi.c     |  60 +++++++++++-
+ drivers/net/wireless/ath/ath11k/wmi.h     |  38 +++++++-
+ 4 files changed, 253 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/wireless/ath/ath11k/core.h b/drivers/net/wireless/ath/ath11k/core.h
+index 5089c36..b9fafee 100644
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -584,6 +584,8 @@ struct ath11k_dbg_htt_stats {
+ 	spinlock_t lock;
+ };
+ 
++#define ATH11K_MAX_COEX_PRIORITY_LEVEL           3
++
+ struct ath11k_debug {
+ 	struct dentry *debugfs_pdev;
+ 	struct ath11k_dbg_htt_stats htt_stats;
+@@ -610,6 +612,7 @@ struct ath11k_debug {
+ 	struct ath11k_db_module_debug *module_debug[WMI_DIRECT_BUF_MAX];
+ 	bool disable_dynamic_bw;
+ 	struct dentry *debugfs_smartant;
++	u32 coex_priority_level[ATH11K_MAX_COEX_PRIORITY_LEVEL];
+ };
+ 
+ struct ath11k_per_peer_tx_stats {
+diff --git a/drivers/net/wireless/ath/ath11k/debugfs.c b/drivers/net/wireless/ath/ath11k/debugfs.c
+index 3cb3bda..69575f2 100644
+--- a/drivers/net/wireless/ath/ath11k/debugfs.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs.c
+@@ -422,6 +422,68 @@ int wmi_ctrl_path_cal_stat(struct ath11k_vif *arvif, const char __user *ubuf,
+ 	return ret_val;
+ }
+ 
++int wmi_ctrl_path_btcoex_stat(struct ath11k_vif *arvif, const char __user *ubuf,
++			      size_t count, loff_t *ppos)
++{
++	struct wmi_ctrl_path_stats_list *stats;
++	struct wmi_ctrl_path_btcoex_stats *btcoex_stats;
++	const int size = 2048;
++	int len = 0, ret_val;
++	char *buf;
++
++	buf = kzalloc(size, GFP_KERNEL);
++	if (!buf)
++		return -ENOMEM;
++
++	list_for_each_entry(stats, &arvif->ar->debug.wmi_list, list) {
++		if (!stats)
++			break;
++
++		btcoex_stats = stats->stats_ptr;
++
++		len += scnprintf(buf + len, size - len,
++				 "WMI_CTRL_PATH_BTCOEX_STATS:\n");
++		len += scnprintf(buf + len, size - len,
++				 "pdev_id = %u\n",
++				 btcoex_stats->pdev_id);
++		len += scnprintf(buf + len, size - len,
++				 "bt_tx_req_cntr = %u\n",
++				 btcoex_stats->bt_tx_req_cntr);
++		len += scnprintf(buf + len, size - len,
++				 "bt_rx_req_cntr = %u\n",
++				 btcoex_stats->bt_rx_req_cntr);
++		len += scnprintf(buf + len, size - len,
++				 "bt_req_nack_cntr = %u\n",
++				 btcoex_stats->bt_req_nack_cntr);
++		len += scnprintf(buf + len, size - len,
++				 "wl_tx_req_nack_schd_bt_reason_cntr = %u\n",
++				 btcoex_stats->wl_tx_req_nack_schd_bt_reason_cntr);
++		len += scnprintf(buf + len, size - len,
++				 "wl_tx_req_nack_current_bt_reason_cntr = %u\n",
++				 btcoex_stats->wl_tx_req_nack_current_bt_reason_cntr);
++		len += scnprintf(buf + len, size - len,
++				 "wl_tx_req_nack_other_wlan_tx_reason_cntr = %u\n",
++				 btcoex_stats->wl_tx_req_nack_other_wlan_tx_reason_cntr);
++		len += scnprintf(buf + len, size - len,
++				 "wl_in_tx_abort_cntr = %u\n",
++				 btcoex_stats->wl_in_tx_abort_cntr);
++		len += scnprintf(buf + len, size - len,
++				 "wl_tx_auto_resp_req_cntr = %u\n",
++				 btcoex_stats->wl_tx_auto_resp_req_cntr);
++		len += scnprintf(buf + len, size - len,
++				 "wl_tx_req_ack_cntr = %u\n",
++				 btcoex_stats->wl_tx_req_ack_cntr);
++		len += scnprintf(buf + len, size - len,
++				 "wl_tx_req_cntr = %u\n",
++				 btcoex_stats->wl_tx_req_cntr);
++	}
++
++	ret_val =  simple_read_from_buffer(ubuf, count, ppos, buf, len);
++	ath11k_wmi_crl_path_stats_list_free(&arvif->ar->debug.wmi_list);
++	kfree(buf);
++	return ret_val;
++}
++
+ static ssize_t ath11k_read_wmi_ctrl_path_stats(struct file *file,
+ 		const char __user *ubuf,
+ 		size_t count, loff_t *ppos)
+@@ -439,6 +501,9 @@ static ssize_t ath11k_read_wmi_ctrl_path_stats(struct file *file,
+ 	case WMI_CTRL_PATH_CAL_STATS:
+ 		ret_val = wmi_ctrl_path_cal_stat(arvif, ubuf, count, ppos);
+ 		break;
++	case WMI_CTRL_PATH_BTCOEX_STATS:
++		ret_val = wmi_ctrl_path_btcoex_stat(arvif, ubuf, count, ppos);
++		break;
+ 	/* Add case for newly wmi ctrl path added stats here */
+ 	default :
+ 		/* Unsupported tag */
+@@ -4335,6 +4400,93 @@ static const struct file_operations fops_medium_busy = {
+ 	.llseek = default_llseek,
+ };
+ 
++static ssize_t ath11k_coex_priority_read(struct file *file,
++					 char __user *user_buf,
++					 size_t count, loff_t *ppos)
++{
++	struct ath11k *ar = file->private_data;
++	u8 buf[128];
++	size_t len = 0;
++	int i;
++
++	mutex_lock(&ar->conf_mutex);
++	for (i = 0; i < ATH11K_MAX_COEX_PRIORITY_LEVEL; i++) {
++		len += scnprintf(buf + len, sizeof(buf) - len,
++				 "priority[%d] :  %u\n", i,
++				 ar->debug.coex_priority_level[0]);
++	}
++	mutex_unlock(&ar->conf_mutex);
++
++	return simple_read_from_buffer(user_buf, count, ppos, buf, len);
++}
++
++static ssize_t ath11k_coex_priority_write(struct file *file,
++					  const char __user *user_buf,
++					  size_t count, loff_t *ppos)
++{
++	struct ath11k *ar = file->private_data;
++	struct ath11k_vif *arvif = NULL;
++	struct coex_config_arg coex_config;
++	char buf[128] = {0};
++	int ret;
++	u32 temp_priority[ATH11K_MAX_COEX_PRIORITY_LEVEL] = {0};
++	u32 config_type = 0xFF;
++
++	mutex_lock(&ar->conf_mutex);
++
++	if (ar->state != ATH11K_STATE_ON &&
++	    ar->state != ATH11K_STATE_RESTARTED) {
++		ret = -ENETDOWN;
++		goto exit;
++	}
++
++	ret = simple_write_to_buffer(buf, sizeof(buf) - 1, ppos, user_buf, count);
++	if (ret < 0)
++		goto exit;
++
++	ret = sscanf(buf, "%x %x %x %x", &config_type, &temp_priority[0],
++		     &temp_priority[1], &temp_priority[2]);
++	if ((config_type == 1 && ret != 4) || (config_type > 1)) {
++		ret = -EINVAL;
++		goto exit;
++	}
++
++	list_for_each_entry(arvif, &ar->arvifs, list) {
++		coex_config.vdev_id = arvif->vdev_id;
++		if (config_type == 1) {
++			coex_config.config_type = WMI_COEX_CONFIG_THREE_WAY_COEX_START;
++			coex_config.priority0 = temp_priority[0];
++			coex_config.priority1 = temp_priority[1];
++			coex_config.priority2 = temp_priority[2];
++		} else {
++			coex_config.config_type = WMI_COEX_CONFIG_THREE_WAY_COEX_RESET;
++		}
++		ret = ath11k_send_coex_config_cmd(ar, &coex_config);
++		if (ret) {
++			ath11k_warn(ar->ab,
++				    "failed to set coex config vdev_id %d ret %d\n",
++				    coex_config.vdev_id, ret);
++			goto exit;
++		}
++	}
++
++	memcpy(ar->debug.coex_priority_level, temp_priority,
++	       sizeof(ar->debug.coex_priority_level));
++
++	ret = count;
++exit:
++	mutex_unlock(&ar->conf_mutex);
++	return ret;
++}
++
++static const struct file_operations fops_coex_priority = {
++	.read = ath11k_coex_priority_read,
++	.write = ath11k_coex_priority_write,
++	.open = simple_open,
++	.owner = THIS_MODULE,
++	.llseek = default_llseek,
++};
++
+ int ath11k_debugfs_register(struct ath11k *ar)
+ {
+ 	struct ath11k_base *ab = ar->ab;
+@@ -4446,6 +4598,8 @@ int ath11k_debugfs_register(struct ath11k *ar)
+ 			    ar->debug.debugfs_pdev, ar, &fops_ani_listen_period);
+ 	debugfs_create_file("medium_busy", S_IRUSR, ar->debug.debugfs_pdev, ar,
+ 			    &fops_medium_busy);
++	debugfs_create_file("coex_priority", 0600,
++			    ar->debug.debugfs_pdev, ar, &fops_coex_priority);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/net/wireless/ath/ath11k/wmi.c b/drivers/net/wireless/ath/ath11k/wmi.c
+index d485bbe..a6ed07e 100644
+--- a/drivers/net/wireless/ath/ath11k/wmi.c
++++ b/drivers/net/wireless/ath/ath11k/wmi.c
+@@ -1831,6 +1831,18 @@ static void ath11k_wmi_copy_coex_config(struct ath11k *ar, struct wmi_coex_confi
+ 			   coex_config->vdev_id,
+ 			   coex_config->coex_algo);
+ 	}
++
++	if (coex_config->config_type == WMI_COEX_CONFIG_THREE_WAY_COEX_START ||
++	    coex_config->config_type == WMI_COEX_CONFIG_THREE_WAY_COEX_RESET) {
++		cmd->priority0 = coex_config->priority0;
++		cmd->priority1 = coex_config->priority1;
++		cmd->priority2 = coex_config->priority2;
++		ath11k_dbg(ar->ab, ATH11K_DBG_WMI,
++			   "WMI coex config type %u vdev id %d priority0 : %u"
++			   " priority1 : %u priority2 : %u", coex_config->config_type,
++			   coex_config->vdev_id, coex_config->priority0,
++			   coex_config->priority1, coex_config->priority2);
++	}
+ }
+ 
+ int ath11k_send_coex_config_cmd(struct ath11k *ar,
+@@ -3140,6 +3152,7 @@ ath11k_wmi_send_wmi_ctrl_stats_cmd(struct ath11k *ar,
+ 		num_pdev_idx++;
+ 		break;
+ 	case WMI_REQ_CTRL_PATH_CAL_STAT:
++	case WMI_REQ_CTRL_PATH_BTCOEX_STAT:
+ 		pdev_id_array[num_pdev_idx] = ar->pdev->pdev_id;
+ 		stats_id = (1 << param->stats_id);
+ 		num_pdev_idx++;
+@@ -4444,7 +4457,9 @@ static int ath11k_init_cmd_send(struct ath11k_pdev_wmi *wmi,
+ 	struct wmi_pdev_band_to_mac *band_to_mac;
+ 	struct wlan_host_mem_chunk *host_mem_chunks;
+ 	struct wmi_tlv *tlv;
++	struct device *dev = ab->dev;
+ 	size_t ret, len;
++	bool three_way_coex_enabled = false;
+ 	void *ptr;
+ 	u32 hw_mode_len = 0;
+ 	u16 idx;
+@@ -4470,6 +4485,9 @@ static int ath11k_init_cmd_send(struct ath11k_pdev_wmi *wmi,
+ 
+ 	ath11k_wmi_copy_resource_config(cfg, param->res_cfg);
+ 
++	three_way_coex_enabled = of_property_read_bool(dev->of_node, "qcom,btcoex");
++	if (three_way_coex_enabled)
++		cfg->flag1 |= WMI_RSRC_CFG_FLAG1_THREE_WAY_COEX_CONFIG_OVERRIDE_SUPPORT;
+ 	cfg->tlv_header = FIELD_PREP(WMI_TLV_TAG, WMI_TAG_RESOURCE_CONFIG) |
+ 			  FIELD_PREP(WMI_TLV_LEN, sizeof(*cfg) - TLV_HDR_SIZE);
+ 
+@@ -7815,6 +7833,42 @@ int wmi_print_ctrl_path_cal_stats_tlv(struct ath11k_base *ab, u16 len,
+ 	return 0;
+ }
+ 
++int wmi_print_ctrl_path_btcoex_stats_tlv(struct ath11k_base *ab, u16 len,
++					 const void *ptr, void *data)
++{
++	struct wmi_ctrl_path_stats_ev_parse_param *stats_buff =
++				(struct wmi_ctrl_path_stats_ev_parse_param *)data;
++	struct wmi_ctrl_path_btcoex_stats *btcoex_stats_skb =
++				(struct wmi_ctrl_path_btcoex_stats *)ptr;
++	struct wmi_ctrl_path_btcoex_stats *btcoex_stats = NULL;
++	struct wmi_ctrl_path_stats_list *stats;
++	struct ath11k *ar = NULL;
++
++	stats = kzalloc(sizeof(*stats), GFP_ATOMIC);
++	if (!stats)
++		return -ENOMEM;
++
++	btcoex_stats = kzalloc(sizeof(*btcoex_stats), GFP_ATOMIC);
++	if (!btcoex_stats) {
++		kfree(stats);
++		return -ENOMEM;
++	}
++
++	memcpy(btcoex_stats, btcoex_stats_skb, sizeof(*btcoex_stats));
++	stats->stats_ptr = btcoex_stats;
++	list_add_tail(&stats->list, &stats_buff->list);
++
++	ar = ath11k_mac_get_ar_by_pdev_id(ab, btcoex_stats_skb->pdev_id + 1);
++	if (!ar) {
++		ath11k_warn(ab, "Failed to get ar for wmi ctrl cal stats\n");
++		return -EINVAL;
++	}
++
++	ar->debug.wmi_ctrl_path_stats_tagid = WMI_CTRL_PATH_BTCOEX_STATS;
++	stats_buff->ar = ar;
++	return 0;
++}
++
+ static int ath11k_wmi_ctrl_stats_subtlv_parser(struct ath11k_base *ab,
+ 					      u16 tag, u16 len,
+ 					      const void *ptr, void *data)
+@@ -7830,10 +7884,14 @@ static int ath11k_wmi_ctrl_stats_subtlv_parser(struct ath11k_base *ab,
+ 	case WMI_CTRL_PATH_CAL_STATS:
+ 		ret = wmi_print_ctrl_path_cal_stats_tlv(ab, len, ptr, data);
+ 		break;
++	case WMI_CTRL_PATH_BTCOEX_STATS:
++		ret = wmi_print_ctrl_path_btcoex_stats_tlv(ab, len, ptr, data);
++		break;
+ 	/* Add case for newly wmi ctrl path added stats here */
+ 	default:
+ 		ath11k_warn(ab,
+-			    "Received invalid tag for wmi ctrl path stats in subtlvs\n");
++			    "Received invalid tag for wmi ctrl path stats in subtlvs, tag : 0x%x\n",
++			    tag);
+ 		return -EINVAL;
+ 		break;
+ 	}
+diff --git a/drivers/net/wireless/ath/ath11k/wmi.h b/drivers/net/wireless/ath/ath11k/wmi.h
+index e7101f0..0148b55 100644
+--- a/drivers/net/wireless/ath/ath11k/wmi.h
++++ b/drivers/net/wireless/ath/ath11k/wmi.h
+@@ -1915,6 +1915,7 @@ enum wmi_tlv_tag {
+ 
+ 	WMI_CTRL_PATH_CAL_STATS = 0x3BC,
+ 	WMI_TAG_DCS_AWGN_INT_TYPE = 0x3C5,
++	WMI_CTRL_PATH_BTCOEX_STATS = 0x3FD,
+ 
+ 	WMI_TAG_MAX
+ };
+@@ -2413,6 +2414,8 @@ struct wmi_init_cmd {
+ #define WMI_RSRC_CFG_FLAG1_ACK_RSSI BIT(18)
+ #define WMI_RSRC_CFG_HOST_SERVICE_FLAG_REG_CC_EXT_SUPPORT_BIT 4
+ #define WMI_RSRC_CFG_FLAG_PEER_TID_EXT BIT(22)
++#define WMI_RSRC_CFG_FLAG1_THREE_WAY_COEX_CONFIG_OVERRIDE_SUPPORT BIT(25)
++
+ 
+ struct wmi_resource_config {
+ 	u32 tlv_header;
+@@ -5413,6 +5416,8 @@ enum wmi_coex_config_type {
+ 	WMI_COEX_CONFIG_WLAN_SCAN_PRIORITY	= 15,
+ 	WMI_COEX_CONFIG_WLAN_PKT_PRIORITY	= 16,
+ 	WMI_COEX_CONFIG_PTA_INTERFACE		= 17,
++	WMI_COEX_CONFIG_THREE_WAY_COEX_RESET    = 32,
++	WMI_COEX_CONFIG_THREE_WAY_COEX_START    = 34,
+ 	/* WMI_COEX_CONFIG_FORCED_ALGO
+ 	 * config to select coex algorithm
+ 	 * coex_algo: select fixed coex algorithm
+@@ -5450,6 +5455,14 @@ struct coex_config_arg {
+ 		struct {
+ 			u32 coex_algo;
+ 		};
++		struct {
++			u32 priority0;
++			u32 priority1;
++			u32 priority2;
++			u32 config_arg4;
++			u32 config_arg5;
++			u32 config_arg6;
++		};
+ 	};
+ };
+ 
+@@ -5486,6 +5499,15 @@ struct wmi_coex_config_cmd {
+ 		struct {
+ 			u32 coex_algo;
+ 		} __packed;
++
++		struct {
++			u32 priority0;
++			u32 priority1;
++			u32 priority2;
++			u32 config_arg4;
++			u32 config_arg5;
++			u32 config_arg6;
++		} __packed;
+ 	} __packed;
+ } __packed;
+ 
+@@ -5866,7 +5888,6 @@ struct  wmi_ctrl_path_stats_cmd_param {
+ 	u32 action;
+ };
+ 
+-
+ struct wmi_ctrl_path_stats_ev_param {
+ 	u32 req_id;
+ 	/* more flag
+@@ -5892,6 +5913,7 @@ enum  wmi_ctrl_path_stats_id {
+ 	WMI_REQ_CTRL_PATH_VDEV_EXTD_STAT = 2,
+ 	WMI_REQ_CTRL_PATH_MEM_STAT       = 3,
+ 	WMI_REQ_CTRL_PATH_CAL_STAT       = 5,
++	WMI_REQ_CTRL_PATH_BTCOEX_STAT    = 8,
+ };
+ 
+ enum wmi_ctrl_path_stats_action {
+@@ -5902,6 +5924,20 @@ enum wmi_ctrl_path_stats_action {
+ 	WMI_REQ_CTRL_PATH_STAT_STOP  = 4,
+ };
+ 
++struct wmi_ctrl_path_btcoex_stats {
++	u32 pdev_id;
++	u32 bt_tx_req_cntr;
++	u32 bt_rx_req_cntr;
++	u32 bt_req_nack_cntr;
++	u32 wl_tx_req_nack_schd_bt_reason_cntr;
++	u32 wl_tx_req_nack_current_bt_reason_cntr;
++	u32 wl_tx_req_nack_other_wlan_tx_reason_cntr;
++	u32 wl_in_tx_abort_cntr;
++	u32 wl_tx_auto_resp_req_cntr;
++	u32 wl_tx_req_ack_cntr;
++	u32 wl_tx_req_cntr;
++};
++
+ struct wmi_obss_spatial_reuse_params_cmd {
+ 	u32 tlv_header;
+ 	u32 pdev_id;
+-- 
+2.7.4
+

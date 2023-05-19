@@ -1,0 +1,58 @@
+From 808593a77b5177742b5f51b6e3b5ed88b9f34e76 Mon Sep 17 00:00:00 2001
+From: Aditya Kumar Singh <quic_adisi@quicinc.com>
+Date: Wed, 1 Dec 2021 14:47:03 +0530
+Subject: [PATCH] mac80211: fix scheduling while atomic crash in
+ ieee80211_csa_finish
+
+Currently, ieee80211_csa_finish() api releases lock on
+sdata->local->hw.wiphy after which it acquires lock on
+sdata->local->iflist_mtx assuming that the caller has
+acquired the lock already which is not the case. Also,
+since this api is called from softirq, mutex locks should
+be avoided inside this api.
+
+Also, for 6GHz, since multiple bssid is enabled by default,
+therefore during channel switch with multiple vaps up,
+releasing lock which is not acquired already leads to
+scheduling while atomic trace.
+
+Hence, this patch fixes this issue by removing releasing and
+acquiring mutex locks inside this api.
+
+Since, no mutex locks are used, list_for_each_entry_safe() is
+replaced with list_for_each_entry_rcu() to protect the list
+access.
+
+Fix: 6ad11629e6d64d753738606c7665d72eae715223
+     mac80211: Fix crash during CSA and hang during wifi down
+
+Signed-off-by: Aditya Kumar Singh <quic_adisi@quicinc.com>
+---
+ net/mac80211/cfg.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+--- a/net/mac80211/cfg.c
++++ b/net/mac80211/cfg.c
+@@ -3333,17 +3333,16 @@ void ieee80211_csa_finish(struct ieee802
+ 	struct ieee80211_sub_if_data *sdata = vif_to_sdata(vif);
+ 
+ 	if (sdata->vif.multiple_bssid.flags & IEEE80211_VIF_MBSS_TRANSMITTING) {
+-		struct ieee80211_sub_if_data *child, *tmp;
+-		wiphy_unlock(sdata->local->hw.wiphy);
+-		mutex_lock(&sdata->local->iflist_mtx);
+-		list_for_each_entry_safe(child, tmp,
++		struct ieee80211_sub_if_data *child;
++
++		rcu_read_lock();
++		list_for_each_entry_rcu(child,
+ 					 &sdata->local->interfaces, list)
+ 			if (child->vif.multiple_bssid.parent == &sdata->vif &&
+ 			    ieee80211_sdata_running(child))
+ 				ieee80211_queue_work(&child->local->hw,
+ 						     &child->csa_finalize_work);
+-		mutex_unlock(&sdata->local->iflist_mtx);
+-		wiphy_lock(sdata->local->hw.wiphy);
++		rcu_read_unlock();
+ 	}
+ 
+ 	ieee80211_queue_work(&sdata->local->hw,

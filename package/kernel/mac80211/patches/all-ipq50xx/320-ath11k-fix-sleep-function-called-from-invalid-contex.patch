@@ -1,0 +1,71 @@
+From 88327536d2c643dbabed84ad4e0e7e03c33035b3 Mon Sep 17 00:00:00 2001
+From: P Praneesh <ppranees@codeaurora.org>
+Date: Fri, 9 Jul 2021 12:18:59 +0530
+Subject: [PATCH] ath11k: WAR for sleep function called from invalid context
+
+mhi_device_get_sync internally calls sleep from the interrupt context.
+Since QCN9074 disable power save mode for all the platforms, no need
+to call wake up MHI. As a WAR, removing these QCA6390 checks and needs to
+be fix it with someother approach to avoid sleep in interrupt context.
+
+Signed-off-by: P Praneesh <ppranees@codeaurora.org>
+---
+ drivers/net/wireless/ath/ath11k/pci.c | 24 ++++++++++++------------
+ 1 file changed, 12 insertions(+), 12 deletions(-)
+
+--- a/drivers/net/wireless/ath/ath11k/pci.c
++++ b/drivers/net/wireless/ath/ath11k/pci.c
+@@ -166,14 +166,6 @@ void ath11k_pci_write32(struct ath11k_ba
+ 	struct ath11k_pci *ab_pci = ath11k_pci_priv(ab);
+ 	u32 window_start;
+ 
+-	/* for offset beyond BAR + 4K - 32, may
+-	 * need to wakeup MHI to access.
+-	 */
+-	if (ab->hw_params.wakeup_mhi &&
+-	    test_bit(ATH11K_PCI_FLAG_INIT_DONE, &ab_pci->flags) &&
+-	    offset >= ACCESS_ALWAYS_OFF && ab_pci->mhi_ctrl)
+-		mhi_device_get_sync(ab_pci->mhi_ctrl->mhi_dev);
+-
+ 	if (offset < WINDOW_START) {
+ 		iowrite32(value, ab->mem  + offset);
+ 	} else {
+@@ -193,11 +185,6 @@ void ath11k_pci_write32(struct ath11k_ba
+ 				  (offset & WINDOW_RANGE_MASK));
+ 		}
+ 	}
+-
+-	if (ab->hw_params.wakeup_mhi &&
+-	    test_bit(ATH11K_PCI_FLAG_INIT_DONE, &ab_pci->flags) &&
+-	    offset >= ACCESS_ALWAYS_OFF && ab_pci->mhi_ctrl)
+-		mhi_device_put(ab_pci->mhi_ctrl->mhi_dev);
+ }
+ EXPORT_SYMBOL(ath11k_pci_write32);
+ 
+@@ -206,14 +193,6 @@ u32 ath11k_pci_read32(struct ath11k_base
+ 	struct ath11k_pci *ab_pci = ath11k_pci_priv(ab);
+ 	u32 val, window_start;
+ 
+-	/* for offset beyond BAR + 4K - 32, may
+-	 * need to wakeup MHI to access.
+-	 */
+-	if (ab->hw_params.wakeup_mhi &&
+-	    test_bit(ATH11K_PCI_FLAG_INIT_DONE, &ab_pci->flags) &&
+-	    offset >= ACCESS_ALWAYS_OFF && ab_pci->mhi_ctrl)
+-		mhi_device_get_sync(ab_pci->mhi_ctrl->mhi_dev);
+-
+ 	if (offset < WINDOW_START) {
+ 		val = ioread32(ab->mem + offset);
+ 	} else {
+@@ -234,11 +213,6 @@ u32 ath11k_pci_read32(struct ath11k_base
+ 		}
+ 	}
+ 
+-	if (ab->hw_params.wakeup_mhi &&
+-	    test_bit(ATH11K_PCI_FLAG_INIT_DONE, &ab_pci->flags) &&
+-	    offset >= ACCESS_ALWAYS_OFF && ab_pci->mhi_ctrl)
+-		mhi_device_put(ab_pci->mhi_ctrl->mhi_dev);
+-
+ 	return val;
+ }
+ EXPORT_SYMBOL(ath11k_pci_read32);

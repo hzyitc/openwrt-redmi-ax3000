@@ -1,0 +1,74 @@
+From c66e156226b0964f0d19d8bcd56867134013e6e8 Mon Sep 17 00:00:00 2001
+From: Venkateswara Naralasetty <quic_vnaralas@quicinc.com>
+Date: Wed, 1 Dec 2021 21:11:17 +0530
+Subject: [PATCH] ath11k: fix kernel panic during unload/load ath11k
+
+netif_napi_del() is not called during ath11k_ahb_free_ext_irq()
+causing kernel panic with unload/load ath11k modules for
+few itterations.
+
+[ 1164.317442] Unable to handle kernel paging request at virtual address deadbeafdeadbebf
+[ 1164.325256] Mem abort info:
+[ 1164.333027]   ESR = 0x96000004
+[ 1164.335655]   EC = 0x25: DABT (current EL), IL = 32 bits
+[ 1164.338828]   SET = 0, FnV = 0
+[ 1164.344242]   EA = 0, S1PTW = 0
+[ 1164.347166] Data abort info:
+[ 1164.350147]   ISV = 0, ISS = 0x00000004
+[ 1164.353269]   CM = 0, WnR = 0
+[ 1164.356889] [deadbeafdeadbebf] address between user and kernel address ranges
+[ 1164.359965] Internal error: Oops: 96000004 [#1] PREEMPT SMP
+[ 1164.571239] CPU: 1 PID: 27721 Comm: insmod Not tainted 5.4.89 #0
+[ 1164.593462] Hardware name: Qualcomm Technologies, Inc. IPQ5018/AP-MP03.5-C2 (DT)
+[ 1164.599543] pstate: a0400005 (NzCv daif +PAN -UAO)
+[ 1164.606927] pc : napi_by_id+0x1c/0x44
+[ 1164.611520] lr : netif_napi_add+0x1b8/0x228
+
+[ 1164.696933] Call trace:
+[ 1164.702231]  napi_by_id+0x1c/0x44
+[ 1164.704407]  ath11k_pci_ext_config_gic_msi_irq+0xe8/0x314 [ath11k_pci]
+[ 1164.707882]  init_module+0xb3a5bc/0xb3b8d8 [ath11k_ahb]
+[ 1164.714299]  init_module+0xb3b618/0xb3b8d8 [ath11k_ahb]
+[ 1164.719423]  platform_drv_probe+0x50/0x9c
+[ 1164.724625]  really_probe+0x1c8/0x410
+[ 1164.728791]  driver_probe_device+0xe8/0x12c
+[ 1164.732437]  device_driver_attach+0x40/0x68
+[ 1164.736430]  __driver_attach+0x120/0x138
+[ 1164.740596]  bus_for_each_dev+0x68/0xbc
+[ 1164.744763]  driver_attach+0x20/0x28
+[ 1164.748324]  bus_add_driver+0x104/0x1f4
+[ 1164.752144]  driver_register+0xa0/0xe4
+[ 1164.755701]  __platform_driver_register+0x48/0x50
+[ 1164.759529]  init_module+0x20/0x1000 [ath11k_ahb]
+[ 1164.764299]  do_one_initcall+0x74/0x190
+[ 1164.768987]  do_init_module+0x54/0x1e0
+[ 1164.772631]  load_module+0x1d8c/0x1f48
+[ 1164.776447]  __se_sys_init_module+0x24c/0x2ac
+[ 1164.780180]  __arm64_sys_init_module+0x14/0x1c
+[ 1164.784612]  el0_svc_common.constprop.0+0x84/0x100
+[ 1164.788948]  el0_svc_handler+0x18/0x20
+[ 1164.793722]  el0_svc+0x8/0x1b4
+[ 1164.797461] Code: d37d1c40 91008021 f8606821 14000005 (b9417801)
+[ 1164.800498] ---[ end trace 9da51c6caab45221 ]---
+
+Signed-off-by: Venkateswara Naralasetty <quic_vnaralas@quicinc.com>
+---
+ drivers/net/wireless/ath/ath11k/ahb.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/net/wireless/ath/ath11k/ahb.c b/drivers/net/wireless/ath/ath11k/ahb.c
+index dad2502..94e6c48 100644
+--- a/drivers/net/wireless/ath/ath11k/ahb.c
++++ b/drivers/net/wireless/ath/ath11k/ahb.c
+@@ -435,6 +435,8 @@ static void ath11k_ahb_free_ext_irq(struct ath11k_base *ab)
+ 
+ 		for (j = 0; j < irq_grp->num_irq; j++)
+ 			free_irq(ab->irq_num[irq_grp->irqs[j]], irq_grp);
++
++		netif_napi_del(&irq_grp->napi);
+ 	}
+ }
+ 
+-- 
+2.7.4
+

@@ -1,0 +1,365 @@
+From f0c52575913377b2bd31efc369723cf9c90b0880 Mon Sep 17 00:00:00 2001
+From: Aditya Kumar Singh <quic_adisi@quicinc.com>
+Date: Wed, 20 Oct 2021 17:05:40 +0530
+Subject: [PATCH] mac80211: add support for 6G channels and regulatory
+
+6G introduces various power modes of operation. Hence to
+support multiple channels for each power mode, the 6G
+channels needs a separate storage space in struct
+ieee80211_supported_band. Because of this, the existing
+APIs to get the channel/freq from freq/channel will not
+work for 6G band.
+
+Hence, this patch adds support to store all possible 6G
+channels according to power mode as well as add API
+support for getting chan/freq info from the new struct
+ieee80211_6ghz_channel.
+
+The new NL80211_ATTR_6G_REG_POWER_MODE NL attribute
+will be used in subsequent patch to get the power mode
+from user space.
+
+Signed-off-by: Aditya Kumar Singh <quic_adisi@quicinc.com>
+---
+ include/linux/ieee80211.h    |  1 +
+ include/net/cfg80211.h       | 31 +++++++++++++++++++++++++++++++
+ include/net/regulatory.h     |  1 +
+ include/uapi/linux/nl80211.h | 16 ++++++++++++++++
+ net/mac80211/util.c          | 11 ++++++++++-
+ net/wireless/nl80211.c       | 15 ++++++++++++++-
+ net/wireless/reg.c           | 31 ++++++++++++++++++++++++-------
+ net/wireless/util.c          | 24 ++++++++++++++++++++++++
+ 8 files changed, 121 insertions(+), 9 deletions(-)
+
+--- a/include/linux/ieee80211.h
++++ b/include/linux/ieee80211.h
+@@ -2325,6 +2325,7 @@ struct ieee80211_he_6ghz_oper {
+ #define		IEEE80211_HE_6GHZ_OPER_CTRL_CHANWIDTH_160MHZ	3
+ #define IEEE80211_HE_6GHZ_OPER_CTRL_DUP_BEACON	0x4
+ #define IEEE80211_HE_6GHZ_OPER_CTRL_REG_INFO    0x38
++#define IEEE80211_HE_6GHZ_OPER_CTRL_REG_INFO_LSB 3
+ 	u8 control;
+ 	u8 ccfs0;
+ 	u8 ccfs1;
+--- a/include/net/cfg80211.h
++++ b/include/net/cfg80211.h
+@@ -453,6 +453,21 @@ struct ieee80211_sta_s1g_cap {
+ };
+ 
+ /**
++ * struct ieee80211_6ghz_channel - 6G channel definitions
++ *
++ * This structure defines all the channels supported by the
++ * 6 GHz band
++ *
++ * @channels: Array of channels the hardware can operate with
++ *      in 6G band.
++ * @n_channels: Number of channels in @channels
++ */
++struct ieee80211_6ghz_channel {
++	struct ieee80211_channel *channels;
++	int n_channels;
++};
++
++/**
+  * struct ieee80211_supported_band - frequency band definition
+  *
+  * This structure describes a frequency band a wiphy
+@@ -460,6 +475,7 @@ struct ieee80211_sta_s1g_cap {
+  *
+  * @channels: Array of channels the hardware can operate with
+  *	in this band.
++ * @chan_6g: Array of 6G channels the hardware can operate with
+  * @band: the band this structure represents
+  * @n_channels: Number of channels in @channels
+  * @bitrates: Array of bitrates the hardware can operate with
+@@ -479,6 +495,7 @@ struct ieee80211_sta_s1g_cap {
+  */
+ struct ieee80211_supported_band {
+ 	struct ieee80211_channel *channels;
++	struct ieee80211_6ghz_channel *chan_6g[NL80211_REG_NUM_POWER_MODES];
+ 	struct ieee80211_rate *bitrates;
+ 	enum nl80211_band band;
+ 	int n_channels;
+@@ -5551,6 +5568,7 @@ struct wireless_dev {
+ 	struct work_struct pmsr_free_wk;
+ 
+ 	unsigned long unprot_beacon_reported;
++	u8 reg_6g_power_mode;
+ };
+ 
+ static inline u8 *wdev_address(struct wireless_dev *wdev)
+@@ -5683,6 +5701,19 @@ ieee80211_get_channel(struct wiphy *wiph
+ }
+ 
+ /**
++ * ieee80211_get_6g_channel_khz - get channel struct from wiphy for specified
++ *                                frequency in 6G band
++ *
++ * @wiphy: the struct wiphy to get the channel for
++ * @freq: the center frequency (in KHz) of the channel
++ * @mode: the poer mode in which freq is to be operated
++ * Return: The channel struct from @wiphy at @freq.
++ */
++struct ieee80211_channel *
++ieee80211_get_6g_channel_khz(struct wiphy *wiphy, u32 freq,
++			     enum nl80211_regulatory_power_modes mode);
++
++/**
+  * cfg80211_channel_is_psc - Check if the channel is a 6 GHz PSC
+  * @chan: control channel to check
+  *
+--- a/include/net/regulatory.h
++++ b/include/net/regulatory.h
+@@ -218,6 +218,7 @@ struct ieee80211_reg_rule {
+ 	struct ieee80211_freq_range freq_range;
+ 	struct ieee80211_power_rule power_rule;
+ 	struct ieee80211_wmm_rule wmm_rule;
++	enum nl80211_regulatory_power_modes mode;
+ 	u32 flags;
+ 	u32 dfs_cac_ms;
+ 	bool has_wmm;
+--- a/include/uapi/linux/nl80211.h
++++ b/include/uapi/linux/nl80211.h
+@@ -3168,6 +3168,8 @@ enum nl80211_attrs {
+ 
+ 	NL80211_ATTR_AWGN_INTERFERENCE_BITMAP,
+ 
++	NL80211_ATTR_6G_REG_POWER_MODE,
++
+ 	/* add attributes here, update the policy in nl80211.c */
+ 
+ 	__NL80211_ATTR_AFTER_LAST,
+@@ -3835,6 +3837,20 @@ enum nl80211_band_attr {
+ 
+ #define NL80211_BAND_ATTR_HT_CAPA NL80211_BAND_ATTR_HT_CAPA
+ 
++enum nl80211_regulatory_power_modes {
++	NL80211_REG_AP_LPI,
++	NL80211_REG_AP_SP,
++	NL80211_REG_AP_VLP,
++	NL80211_REG_REGULAR_CLIENT_LPI,
++	NL80211_REG_REGULAR_CLIENT_SP,
++	NL80211_REG_REGULAR_CLIENT_VLP,
++	NL80211_REG_SUBORDINATE_CLIENT_LPI,
++	NL80211_REG_SUBORDINATE_CLIENT_SP,
++	NL80211_REG_SUBORDINATE_CLIENT_VLP,
++
++	NL80211_REG_NUM_POWER_MODES,
++};
++
+ /**
+  * enum nl80211_wmm_rule - regulatory wmm rule
+  *
+--- a/net/mac80211/util.c
++++ b/net/mac80211/util.c
+@@ -3375,10 +3375,13 @@ bool ieee80211_chandef_he_6ghz_oper(stru
+ 	const struct ieee80211_sta_he_cap *he_cap;
+ 	struct cfg80211_chan_def he_chandef = *chandef;
+ 	const struct ieee80211_he_6ghz_oper *he_6ghz_oper;
++	enum nl80211_regulatory_power_modes mode;
+ 	struct ieee80211_bss_conf *bss_conf = &sdata->vif.bss_conf;
+ 	bool support_80_80, support_160;
+ 	u8 he_phy_cap;
+ 	u32 freq;
++	u8 reg_info;
++	u8 reg_6g_power_mode;
+ 
+ 	if (chandef->chan->band != NL80211_BAND_6GHZ)
+ 		return true;
+@@ -3415,9 +3418,29 @@ bool ieee80211_chandef_he_6ghz_oper(stru
+ 		return false;
+ 	}
+ 
++	/* 6G Power mode present in the beacon */
++	reg_info = (he_6ghz_oper->control & IEEE80211_HE_6GHZ_OPER_CTRL_REG_INFO) >>
++		   IEEE80211_HE_6GHZ_OPER_CTRL_REG_INFO_LSB;
++
++	/* 6G Power mode configured by the user */
++	reg_6g_power_mode = sdata->wdev.reg_6g_power_mode;
++
++	/**
++	 * For AP/AP_VLAN/MESH_POINT interfaces, the 6G power mode depends on the
++	 * mode configured by user (LPI/SP/VLP). For other interfaces (for ex STA)
++	 * mode depends on the power mode present in beacon as well as power mode
++	 * configured by the user for that interface
++	 */
++	if (iftype == NL80211_IFTYPE_AP || iftype == NL80211_IFTYPE_AP_VLAN ||
++	    iftype == NL80211_IFTYPE_MESH_POINT) {
++		mode = reg_6g_power_mode;
++	} else
++		mode = 3 * (1 + reg_6g_power_mode) + reg_info;
++
+ 	freq = ieee80211_channel_to_frequency(he_6ghz_oper->primary,
+ 					      NL80211_BAND_6GHZ);
+-	he_chandef.chan = ieee80211_get_channel(sdata->local->hw.wiphy, freq);
++	he_chandef.chan = ieee80211_get_6g_channel_khz(sdata->local->hw.wiphy,
++						       MHZ_TO_KHZ(freq), mode);
+ 
+ 	switch (u8_get_bits(he_6ghz_oper->control,
+ 			    IEEE80211_HE_6GHZ_OPER_CTRL_REG_INFO)) {
+--- a/net/wireless/nl80211.c
++++ b/net/wireless/nl80211.c
+@@ -803,6 +803,7 @@ static const struct nla_policy nl80211_p
+ 	[NL80211_ATTR_STA_MGMT_RTS_CTS_CONFIG] =
+ 					NLA_POLICY_MAX(NLA_U8, NL80211_MGMT_RTS_CTS_DISABLE),
+ 	[NL80211_ATTR_AWGN_INTERFERENCE_BITMAP] = { .type = NLA_U32 },
++	[NL80211_ATTR_6G_REG_POWER_MODE] = NLA_POLICY_RANGE(NLA_U8, 0, 2),
+ };
+ 
+ /* policy for the key attributes */
+@@ -3050,6 +3051,7 @@ int nl80211_parse_chandef(struct cfg8021
+ {
+ 	struct netlink_ext_ack *extack = genl_info_extack(info);
+ 	struct nlattr **attrs = info->attrs;
++	enum nl80211_regulatory_power_modes mode = NL80211_REG_AP_LPI;
+ 	u32 control_freq;
+ 
+ 	if (!attrs[NL80211_ATTR_WIPHY_FREQ])
+@@ -3061,8 +3063,19 @@ int nl80211_parse_chandef(struct cfg8021
+ 		control_freq +=
+ 		    nla_get_u32(info->attrs[NL80211_ATTR_WIPHY_FREQ_OFFSET]);
+ 
++	if (info->attrs[NL80211_ATTR_6G_REG_POWER_MODE])
++		mode = nla_get_u8(info->attrs[NL80211_ATTR_6G_REG_POWER_MODE]);
++
+ 	memset(chandef, 0, sizeof(*chandef));
+-	chandef->chan = ieee80211_get_channel_khz(&rdev->wiphy, control_freq);
++
++	if (control_freq >= MHZ_TO_KHZ(5945) && control_freq <= MHZ_TO_KHZ(7125))
++		chandef->chan = ieee80211_get_6g_channel_khz(&rdev->wiphy,
++							     control_freq,
++							     mode);
++	else
++		chandef->chan = ieee80211_get_channel_khz(&rdev->wiphy,
++							  control_freq);
++
+ 	chandef->width = NL80211_CHAN_WIDTH_20_NOHT;
+ 	chandef->center_freq1 = KHZ_TO_MHZ(control_freq);
+ 	chandef->freq1_offset = control_freq % 1000;
+--- a/net/wireless/reg.c
++++ b/net/wireless/reg.c
+@@ -1596,7 +1596,8 @@ static u32 map_regdom_flags(u32 rd_flags
+ 
+ static const struct ieee80211_reg_rule *
+ freq_reg_info_regd(u32 center_freq,
+-		   const struct ieee80211_regdomain *regd, u32 bw)
++		   const struct ieee80211_regdomain *regd, u32 bw,
++		   enum nl80211_regulatory_power_modes mode)
+ {
+ 	int i;
+ 	bool band_rule_found = false;
+@@ -1610,7 +1611,12 @@ freq_reg_info_regd(u32 center_freq,
+ 		const struct ieee80211_freq_range *fr = NULL;
+ 
+ 		rr = &regd->reg_rules[i];
+-		fr = &rr->freq_range;
++
++		if (rr->mode == mode)
++			fr = &rr->freq_range;
++
++		if (!fr)
++			continue;
+ 
+ 		/*
+ 		 * We only need to know if one frequency rule was
+@@ -1642,7 +1648,7 @@ __freq_reg_info(struct wiphy *wiphy, u32
+ 	u32 bw;
+ 
+ 	for (bw = MHZ_TO_KHZ(bws[i]); bw >= min_bw; bw = MHZ_TO_KHZ(bws[i--])) {
+-		reg_rule = freq_reg_info_regd(center_freq, regd, bw);
++		reg_rule = freq_reg_info_regd(center_freq, regd, bw, 0);
+ 		if (!IS_ERR(reg_rule))
+ 			return reg_rule;
+ 	}
+@@ -2292,7 +2298,7 @@ static void reg_process_ht_flags_channel
+ 	if (regd) {
+ 		const struct ieee80211_reg_rule *reg_rule =
+ 			freq_reg_info_regd(MHZ_TO_KHZ(channel->center_freq),
+-					   regd, MHZ_TO_KHZ(20));
++					   regd, MHZ_TO_KHZ(20), 0);
+ 
+ 		if (!IS_ERR(reg_rule))
+ 			flags = reg_rule->flags;
+@@ -2502,7 +2508,8 @@ static void update_all_wiphy_regulatory(
+ static void handle_channel_custom(struct wiphy *wiphy,
+ 				  struct ieee80211_channel *chan,
+ 				  const struct ieee80211_regdomain *regd,
+-				  u32 min_bw)
++				  u32 min_bw,
++				  enum nl80211_regulatory_power_modes mode)
+ {
+ 	u32 bw_flags = 0;
+ 	const struct ieee80211_reg_rule *reg_rule = NULL;
+@@ -2511,7 +2518,7 @@ static void handle_channel_custom(struct
+ 
+ 	center_freq_khz = ieee80211_channel_to_khz(chan);
+ 	for (bw = MHZ_TO_KHZ(20); bw >= min_bw; bw = bw / 2) {
+-		reg_rule = freq_reg_info_regd(center_freq_khz, regd, bw);
++		reg_rule = freq_reg_info_regd(center_freq_khz, regd, bw, mode);
+ 		if (!IS_ERR(reg_rule))
+ 			break;
+ 	}
+@@ -2564,10 +2571,20 @@ static void handle_band_custom(struct wi
+ 			       const struct ieee80211_regdomain *regd)
+ {
+ 	unsigned int i;
++	unsigned int j;
+ 
+ 	if (!sband)
+ 		return;
+ 
++	if (sband->band == NL80211_BAND_6GHZ) {
++		for (i = 0; i < NL80211_REG_NUM_POWER_MODES; i++)
++			for (j = 0; j < sband->chan_6g[i]->n_channels; j++)
++				handle_channel_custom(wiphy,
++						      &sband->chan_6g[i]->channels[j],
++						      regd, MHZ_TO_KHZ(20), i);
++		return;
++	}
++
+ 	/*
+ 	 * We currently assume that you always want at least 20 MHz,
+ 	 * otherwise channel 12 might get enabled if this rule is
+@@ -2575,7 +2592,7 @@ static void handle_band_custom(struct wi
+ 	 */
+ 	for (i = 0; i < sband->n_channels; i++)
+ 		handle_channel_custom(wiphy, &sband->channels[i], regd,
+-				      MHZ_TO_KHZ(20));
++				      MHZ_TO_KHZ(20), 0);
+ }
+ 
+ /* Used by drivers prior to wiphy registration */
+--- a/net/wireless/util.c
++++ b/net/wireless/util.c
+@@ -164,6 +164,30 @@ int ieee80211_freq_khz_to_channel(u32 fr
+ }
+ EXPORT_SYMBOL(ieee80211_freq_khz_to_channel);
+ 
++struct ieee80211_channel
++*ieee80211_get_6g_channel_khz(struct wiphy *wiphy, u32 freq,
++			      enum nl80211_regulatory_power_modes mode)
++{
++	struct ieee80211_supported_band *sband;
++	int i;
++
++	sband = wiphy->bands[NL80211_BAND_6GHZ];
++
++	if (!sband || mode >= NL80211_REG_NUM_POWER_MODES)
++		return NULL;
++
++	for (i = 0; i < sband->chan_6g[mode]->n_channels; i++) {
++		struct ieee80211_channel *chan =
++				&sband->chan_6g[mode]->channels[i];
++
++		if (ieee80211_channel_to_khz(chan) == freq)
++			return chan;
++	}
++
++	return NULL;
++}
++EXPORT_SYMBOL(ieee80211_get_6g_channel_khz);
++
+ struct ieee80211_channel *ieee80211_get_channel_khz(struct wiphy *wiphy,
+ 						    u32 freq)
+ {

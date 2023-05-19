@@ -1,0 +1,73 @@
+From 62d0aec59d1b4e3c7d029040f8a0efda1df80362 Mon Sep 17 00:00:00 2001
+From: Thiraviyam Mariyappan <quic_tmariyap@quicinc.com>
+Date: Wed, 8 Dec 2021 12:48:11 +0530
+Subject: [PATCH] ath11k: support avg signal in station dump
+
+mac80211 doesn't calculate avg signal since uses_rss enabled from driver.
+so, avg signal doesn't print in station dump. This patch calculates
+avg signal from the rssi and displayed in station dump.
+
+Signed-off-by: Thiraviyam Mariyappan <quic_tmariyap@quicinc.com>
+---
+ drivers/net/wireless/ath/ath11k/core.h  | 2 ++
+ drivers/net/wireless/ath/ath11k/dp_rx.c | 1 +
+ drivers/net/wireless/ath/ath11k/mac.c   | 4 ++++
+ 3 files changed, 7 insertions(+)
+
+diff --git a/drivers/net/wireless/ath/ath11k/core.h b/drivers/net/wireless/ath/ath11k/core.h
+index 0da96ae..70cb8e6 100644
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -510,6 +510,7 @@ struct ath11k_driver_rx_pkts_flow {
+ };
+ 
+ DECLARE_EWMA(sta_per, 8, 16)
++DECLARE_EWMA(avg_rssi, 10, 8)
+ 
+ struct ath11k_sta {
+ 	struct ath11k_vif *arvif;
+@@ -528,6 +529,7 @@ struct ath11k_sta {
+ 	u64 rx_duration;
+ 	u64 tx_duration;
+ 	u8 rssi_comb;
++	struct ewma_avg_rssi avg_rssi;
+ 	struct ath11k_htt_tx_stats *tx_stats;
+ 	struct ath11k_rx_peer_stats *rx_stats;
+ 	struct ath11k_smart_ant_sta *smart_ant_sta;
+diff --git a/drivers/net/wireless/ath/ath11k/dp_rx.c b/drivers/net/wireless/ath/ath11k/dp_rx.c
+index db5ac70..d0b60cd 100644
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -3448,6 +3448,7 @@ static void ath11k_dp_rx_update_peer_su_stats(struct ath11k *ar,
+ 		return;
+ 
+ 	arsta->rssi_comb = ppdu_info->rssi_comb;
++	ewma_avg_rssi_add(&arsta->avg_rssi, ppdu_info->rssi_comb);
+ 
+ 	if (!ath11k_debugfs_is_extd_rx_stats_enabled(ar))
+ 		return;
+diff --git a/drivers/net/wireless/ath/ath11k/mac.c b/drivers/net/wireless/ath/ath11k/mac.c
+index b313ca7..f81a718 100644
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -5250,6 +5250,7 @@ static int ath11k_mac_station_add(struct ath11k *ar,
+ 	ewma_sta_per_add(&arsta->per, 1);
+ 	ewma_sta_ber_init(&arsta->ber);
+ 	ewma_sta_ber_add(&arsta->ber, 1);
++	ewma_avg_rssi_init(&arsta->avg_rssi);
+ 	return 0;
+ 
+ free_tx_stats:
+@@ -10478,6 +10479,9 @@ static void ath11k_mac_op_sta_statistics(struct ieee80211_hw *hw,
+ 	sinfo->signal = arsta->rssi_comb + ATH11K_DEFAULT_NOISE_FLOOR;
+ 	sinfo->filled |= BIT_ULL(NL80211_STA_INFO_SIGNAL);
+ 
++	sinfo->signal_avg = ewma_avg_rssi_read(&arsta->avg_rssi) + ATH11K_DEFAULT_NOISE_FLOOR;
++	sinfo->filled |= BIT_ULL(NL80211_STA_INFO_SIGNAL_AVG);
++
+ 	if (arvif->ar->ab->nss.enabled)
+ 		ath11k_nss_update_sta_stats(arvif, sinfo, sta);
+ }
+-- 
+2.7.4
+

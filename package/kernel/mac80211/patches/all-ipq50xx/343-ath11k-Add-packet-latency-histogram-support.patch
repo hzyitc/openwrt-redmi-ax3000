@@ -1,0 +1,462 @@
+From f2efdde9e7e7e0ccecf86f1a44c1cda28812aada Mon Sep 17 00:00:00 2001
+From: Sowmiya Sree Elavalagan <quic_ssreeela@quicinc.com>
+Date: Mon, 6 Sep 2021 19:57:33 +0530
+Subject: [PATCH] ath11k: Add packet latency histogram support
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The latency of a packet is measured from packet being enqueued
+to the driver's transmit queue, to frame has been successfully
+ack’ed by the receiver. Enqueue time is added in tx info and
+difference in time is calculated once the packet is acked by
+the receiver. Latency is calculated in powers of 2 and number
+of packets that took a particular time is incremented in the
+corresponding index and displayed via debugfs
+
+Signed-off-by: Sowmiya Sree Elavalagan <quic_ssreeela@quicinc.com>
+---
+ drivers/net/wireless/ath/ath11k/core.h    |  13 +++
+ drivers/net/wireless/ath/ath11k/debugfs.c | 138 ++++++++++++++++++++++++++++++
+ drivers/net/wireless/ath/ath11k/debugfs.h |   5 ++
+ drivers/net/wireless/ath/ath11k/dp_tx.c   |  50 +++++++++++
+ include/net/mac80211.h                    |  13 ++-
+ net/mac80211/tx.c                         |  12 +++
+ 6 files changed, 230 insertions(+), 1 deletion(-)
+
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -631,9 +631,23 @@ struct ath11k_dbg_htt_stats {
+ 
+ #define ATH11K_MAX_COEX_PRIORITY_LEVEL           3
+ 
++#define ATH11K_DELAY_STATS_SCALED_BINS		20
++#define ATH11K_DELAY_STATS_MAX_BINS		(ATH11K_DELAY_STATS_SCALED_BINS + 1)
++struct ath11k_tx_delay_stats {
++	/* histogram of tx delay with 21 bins. The bucket size scales
++	 * exponentially, from 1ms to 1024ms. Each power-of-two bucket that
++	 * spans greater than 1ms is subdivided into two bins (e.g. the range
++	 * [2, 4) is broken into bins [2, 3) and [3, 4), while the range
++	 * [32, 64) is broken into bins [32, 48) and [48, 64), etc.).
++	 * Each bin is a counter of tx packet with delay in that range.
++	 */
++	u32 counts[ATH11K_DELAY_STATS_MAX_BINS];
++};
++
+ struct ath11k_debug {
+ 	struct dentry *debugfs_pdev;
+ 	struct ath11k_dbg_htt_stats htt_stats;
++	struct ath11k_tx_delay_stats *tx_delay_stats[IEEE80211_NUM_TIDS];
+ 	u32 extd_tx_stats;
+ 	struct ath11k_fw_stats fw_stats;
+ 	struct completion fw_stats_complete;
+--- a/drivers/net/wireless/ath/ath11k/debugfs.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs.c
+@@ -2238,6 +2238,144 @@ void ath11k_debugfs_fw_stats_init(struct
+ 	init_completion(&ar->debug.fw_stats_complete);
+ }
+ 
++/* TX delay stats class names ordered by TID. */
++static const char ath11k_tx_delay_stats_names[][7] = {
++	"AC_BE",
++	"AC_BK",
++	"AC_BK+",
++	"AC_BE+",
++	"AC_VI",
++	"AC_VI+",
++	"AC_VO",
++	"AC_VO+",
++	"TID8",
++	"TID9",
++	"TID10",
++	"TID11",
++	"TID12",
++	"TID13",
++	"TID14",
++	"TID15",
++};
++
++#define ATH11K_TX_DELAY_STATS_NAMES_SIZE ARRAY_SIZE(ath11k_tx_delay_stats_names)
++
++/* Returns start time of the transmit delay histogram stats bin. */
++static inline int ath11k_tx_delay_bin_to_ms(int bin)
++{
++	int bin_ms;
++
++	/* The first two bins span 1ms (i.e. [0, 1), and [1, 2)) are returned
++	 * directly. All other power-of-two bucket ranges are subdivided into
++	 * two bins, with the even numbered bin covering the first half of the
++	 * range and the odd numbered bin offset by 1/2 of the range.
++	 */
++	if (bin < 2)
++		return bin;
++	bin_ms = 1 << (bin / 2);
++	if (bin % 2)
++		bin_ms += bin_ms >> 1;
++	return bin_ms;
++}
++
++static ssize_t ath11k_tx_delay_histo_dump(struct file *file,
++					  char __user *user_buf,
++					  size_t count, loff_t *ppos)
++{
++	struct ath11k_tx_delay_stats *stats = file->private_data;
++	struct ath11k_tx_delay_stats stats_local;
++	char *buf;
++	unsigned int len = 0, buf_len = 4096, i;
++	ssize_t ret_cnt;
++
++	memcpy(&stats_local, stats, sizeof(struct ath11k_tx_delay_stats));
++	buf = kzalloc(buf_len, GFP_KERNEL);
++	if (!buf)
++		return 0;
++
++	len += scnprintf(buf + len, buf_len - len, "TX delay histogram(ms)\n");
++	for (i = 0; i < ATH11K_DELAY_STATS_SCALED_BINS; i++) {
++		len += scnprintf(buf + len, buf_len - len,
++				 "[%4u - %4u):%8u ",
++				 ath11k_tx_delay_bin_to_ms(i),
++				 ath11k_tx_delay_bin_to_ms(i + 1),
++				 stats_local.counts[i]);
++
++		if (i % 5 == 4)
++			len += scnprintf(buf + len, buf_len - len, "\n");
++	}
++	len += scnprintf(buf + len, buf_len - len, "[%4d -  inf):%8u ",
++			 ath11k_tx_delay_bin_to_ms(i), stats_local.counts[i]);
++
++	len += scnprintf(buf + len, buf_len - len, "\n");
++
++	ret_cnt = simple_read_from_buffer(user_buf, count, ppos, buf, len);
++	kfree(buf);
++	return ret_cnt;
++}
++
++static ssize_t ath11k_tx_delay_histo_reset(struct file *file,
++					   const char __user *user_buf,
++					   size_t count, loff_t *ppos)
++{
++	struct ath11k_tx_delay_stats *stats = file->private_data;
++	int val, ret;
++
++	ret = kstrtoint_from_user(user_buf, count, 0, &val);
++	if (ret)
++		return ret;
++	if (val != 0)
++		return -EINVAL;
++	memset(stats, 0, sizeof(struct ath11k_tx_delay_stats));
++	return count;
++}
++
++static const struct file_operations fops_tx_delay_histo = {
++	.read = ath11k_tx_delay_histo_dump,
++	.write = ath11k_tx_delay_histo_reset,
++	.open = simple_open,
++	.owner = THIS_MODULE,
++	.llseek = default_llseek,
++};
++
++void ath11k_init_tx_latency_stats(struct ath11k *ar)
++{
++	size_t tx_delay_stats_size;
++	struct ath11k_tx_delay_stats *pbuf, *buf;
++	struct dentry *tx_delay_histo_dir;
++	int i;
++
++	tx_delay_stats_size = sizeof(struct ath11k_tx_delay_stats) *
++			      ARRAY_SIZE(ar->debug.tx_delay_stats);
++
++	pbuf = kzalloc(tx_delay_stats_size, GFP_KERNEL);
++	if (!pbuf) {
++		ath11k_err(ar->ab, "Unable to allocate memory for latency stats\n");
++		return;
++	}
++
++	buf = pbuf;
++
++	for (i = 0; i < ARRAY_SIZE(ar->debug.tx_delay_stats); i++) {
++		ar->debug.tx_delay_stats[i] = buf;
++		buf++;
++	}
++
++	tx_delay_histo_dir = debugfs_create_dir("tx_delay_histogram",
++						ar->debug.debugfs_pdev);
++	if (IS_ERR_OR_NULL(tx_delay_histo_dir)) {
++		ath11k_err(ar->ab, "Failed to create debugfs dir tx_delay_stats\n");
++		kfree(pbuf);
++		return;
++	}
++	for (i = 0; i < ATH11K_TX_DELAY_STATS_NAMES_SIZE; i++) {
++		debugfs_create_file(ath11k_tx_delay_stats_names[i], 0644,
++				    tx_delay_histo_dir,
++				    ar->debug.tx_delay_stats[i],
++				    &fops_tx_delay_histo);
++	}
++}
++
+ static ssize_t ath11k_write_pktlog_filter(struct file *file,
+ 					  const char __user *ubuf,
+ 					  size_t count, loff_t *ppos)
+@@ -4516,6 +4654,7 @@ int ath11k_debugfs_register(struct ath11
+ 	ath11k_debugfs_htt_stats_init(ar);
+ 
+ 	ath11k_debugfs_fw_stats_init(ar);
++	ath11k_init_tx_latency_stats(ar);
+ 	ath11k_init_pktlog(ar);
+ 	ath11k_smart_ant_debugfs_init(ar);
+ 	init_completion(&ar->tpc_complete);
+@@ -4632,6 +4771,7 @@ void ath11k_debugfs_unregister(struct at
+ 	}
+ 
+ 	ath11k_deinit_pktlog(ar);
++	kfree(ar->debug.tx_delay_stats[0]);
+ 	debugfs_remove_recursive(ar->debug.debugfs_pdev);
+ 	ar->debug.debugfs_pdev = NULL;
+ }
+--- a/drivers/net/wireless/ath/ath11k/debugfs.h
++++ b/drivers/net/wireless/ath/ath11k/debugfs.h
+@@ -242,6 +242,7 @@ void ath11k_debugfs_unregister(struct at
+ void ath11k_debugfs_fw_stats_process(struct ath11k_base *ab, struct sk_buff *skb);
+ 
+ void ath11k_debugfs_fw_stats_init(struct ath11k *ar);
++void ath11k_init_tx_latency_stats(struct ath11k *ar);
+ void ath11k_smart_ant_debugfs_init(struct ath11k *ar);
+ ssize_t ath11k_debugfs_dump_soc_ring_bp_stats(struct ath11k_base *ab,
+ 					    char *buf, int size);
+@@ -343,6 +344,10 @@ static inline void ath11k_debugfs_fw_sta
+ {
+ }
+ 
++static inline void ath11k_init_tx_latency_stats(struct ath11k *ar)
++{
++}
++
+ static inline int ath11k_debugfs_is_extd_tx_stats_enabled(struct ath11k *ar)
+ {
+ 	return 0;
+--- a/drivers/net/wireless/ath/ath11k/dp_tx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_tx.c
+@@ -844,6 +844,57 @@ static inline bool ath11k_dp_tx_completi
+ 	return true;
+ }
+ 
++static inline u32 txdelay_time_to_ms(u32 val)
++{
++	u64 valns = ((u64)val << IEEE80211_TX_DELAY_SHIFT);
++
++	do_div(valns, NSEC_PER_MSEC);
++	return (u32)valns;
++}
++
++/* Returns transmit delay histogram stats bin to credit based on latency. */
++static inline int txdelay_ms_to_bin(u32 latency)
++{
++	int top_bit_set;
++	int bin_offset;
++
++	/* The exponential (power-of-two) bucket range is determined by the high
++	 * order bit set.  The first two 1ms bin (i.e. [0, 1) and [1, 2)) are
++	 * returned directly.  All other bins are subdivided in half by
++	 * calculating bin_offset based on the bit immediately to the right of
++	 * the high order bit set.
++	 */
++	top_bit_set = fls(latency);
++	if (top_bit_set < 2)
++		return top_bit_set;
++	if (top_bit_set > ATH11K_DELAY_STATS_SCALED_BINS)
++		return ATH11K_DELAY_STATS_SCALED_BINS;
++	bin_offset = (latency & (1 << (top_bit_set - 2))) ? 1 : 0;
++	return (top_bit_set - 1) * 2 + bin_offset;
++}
++
++void ath11k_update_latency_stats(struct ath11k *ar, struct sk_buff *msdu, u8 tid)
++{
++	u32 enqueue_time, now;
++	struct ieee80211_tx_info *info;
++	int bin;
++
++	info = IEEE80211_SKB_CB(msdu);
++	enqueue_time = info->latency.tx_start_time;
++	if (enqueue_time == 0)
++		return;
++
++	now = ieee80211_txdelay_get_time();
++	bin = txdelay_ms_to_bin(txdelay_time_to_ms(now - enqueue_time));
++
++	if (!ar->debug.tx_delay_stats) {
++		ath11k_warn(ar->ab, "tx delay stats invalid\n");
++		return;
++	}
++
++	ar->debug.tx_delay_stats[tid]->counts[bin]++;
++}
++
+ void ath11k_dp_tx_completion_handler(struct ath11k_base *ab, int ring_id)
+ {
+ 	struct ath11k *ar;
+@@ -857,7 +908,7 @@ void ath11k_dp_tx_completion_handler(str
+ 	int valid_entries, count = 0, i = 0;
+ 	u32 *desc;
+ 	u32 msdu_id, desc_id;
+-	u8 mac_id;
++	u8 mac_id, tid;
+ 
+ 	spin_lock_bh(&status_ring->lock);
+ 
+@@ -926,6 +977,12 @@ void ath11k_dp_tx_completion_handler(str
+ 
+ 		ar = ab->pdevs[mac_id].ar;
+ 
++		tid = FIELD_GET(HAL_WBM_RELEASE_INFO3_TID, tx_status->info3);
++		if (tid < IEEE80211_NUM_TIDS)
++			ath11k_update_latency_stats(ar, msdu, tid);
++		else
++			ath11k_warn(ab, "Received data with invalid tid\n");
++
+ 		if (atomic_dec_and_test(&ar->dp.num_tx_pending))
+ 			wake_up(&ar->dp.tx_empty_waitq);
+ 
+--- a/include/net/mac80211.h
++++ b/include/net/mac80211.h
+@@ -1098,7 +1098,6 @@ struct ieee80211_tx_info {
+ 	    hw_queue:4,
+ 	    tx_time_est:10;
+ 	/* 2 free bits */
+-
+ 	union {
+ 		struct {
+ 			union {
+@@ -1145,9 +1144,21 @@ struct ieee80211_tx_info {
+ 		};
+ 		void *driver_data[
+ 			IEEE80211_TX_INFO_DRIVER_DATA_SIZE / sizeof(void *)];
++	struct {
++		u8 pad[36];
++		u32 tx_start_time;
++	} latency;
+ 	};
+ };
+ 
++#define IEEE80211_TX_DELAY_SHIFT	10
++static inline u32 ieee80211_txdelay_get_time(void)
++{
++	u64 ns = ktime_get_ns();
++
++	return ns >> IEEE80211_TX_DELAY_SHIFT;
++}
++
+ static inline u16
+ ieee80211_info_set_tx_time_est(struct ieee80211_tx_info *info, u16 tx_time_est)
+ {
+--- a/net/mac80211/tx.c
++++ b/net/mac80211/tx.c
+@@ -1601,6 +1601,7 @@ static bool ieee80211_queue_skb(struct i
+ 				struct sta_info *sta,
+ 				struct sk_buff *skb)
+ {
++	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
+ 	struct ieee80211_vif *vif;
+ 	struct txq_info *txqi;
+ 
+@@ -1620,6 +1621,9 @@ static bool ieee80211_queue_skb(struct i
+ 
+ 	ieee80211_txq_enqueue(local, txqi, skb);
+ 
++	if (local->enable_tx_latency_stats)
++		info->latency.tx_start_time =  ieee80211_txdelay_get_time();
++
+ 	schedule_and_wake_txq(local, txqi);
+ 
+ 	return true;
+@@ -1692,6 +1696,9 @@ static bool ieee80211_tx_frags(struct ie
+ 		control.sta = sta ? &sta->sta : NULL;
+ 
+ 		__skb_unlink(skb, skbs);
++		if (local->enable_tx_latency_stats)
++			info->latency.tx_start_time =  ieee80211_txdelay_get_time();
++
+ 		drv_tx(local, &control, skb);
+ 	}
+ 
+@@ -4270,6 +4277,9 @@ static bool ieee80211_tx_8023(struct iee
+ 
+ 	control.sta = pubsta;
+ 
++	if (local->enable_tx_latency_stats)
++		info->latency.tx_start_time =  ieee80211_txdelay_get_time();
++
+ 	drv_tx(local, &control, skb);
+ 
+ 	if (sta)
+@@ -4381,6 +4391,8 @@ void ieee80211_8023_xmit_ap(struct ieee8
+ 
+ 	info->flags |= IEEE80211_TX_CTL_HW_80211_ENCAP;
+ 	info->control.vif = &sdata->vif;
++	if (local->enable_tx_latency_stats)
++		info->latency.tx_start_time =  ieee80211_txdelay_get_time();
+ 
+ 	if (key)
+ 		info->control.hw_key = &key->conf;
+--- a/net/mac80211/ieee80211_i.h
++++ b/net/mac80211/ieee80211_i.h
+@@ -1465,6 +1465,8 @@ struct ieee80211_local {
+ 	struct mac80211_memory_stats memory_stats;
+ 	struct work_struct awgn_detected_work;
+ 	u32 chan_bw_interference_bitmap;
++
++	bool enable_tx_latency_stats;
+ };
+ 
+ static inline struct ieee80211_sub_if_data *
+--- a/net/mac80211/debugfs.c
++++ b/net/mac80211/debugfs.c
+@@ -369,6 +369,41 @@ static const struct file_operations dbg_
+ 	.llseek = default_llseek,
+ };
+ 
++static ssize_t enable_tx_latency_stats_read(struct file *file, char __user *user_buf,
++			     size_t count, loff_t *ppos)
++{
++	struct ieee80211_local *local = file->private_data;
++	char buf[10];
++	int len = 0;
++
++	len = scnprintf(buf, sizeof(buf), "%u\n", local->enable_tx_latency_stats);
++
++	return simple_read_from_buffer(user_buf, count, ppos, buf, len);
++}
++
++static ssize_t enable_tx_latency_stats_write(struct file *file, const char __user *user_buf,
++			      size_t count, loff_t *ppos)
++{
++	struct ieee80211_local *local = file->private_data;
++	int ret, enable_disable;
++
++	ret = kstrtou32_from_user(user_buf, count, 0, &enable_disable);
++	if (ret || (enable_disable != 1 && enable_disable != 0))
++		return -EINVAL;
++
++	local->enable_tx_latency_stats = enable_disable;
++
++	return count;
++}
++
++
++static const struct file_operations enable_tx_latency_stats_ops = {
++	.write = enable_tx_latency_stats_write,
++	.read = enable_tx_latency_stats_read,
++	.open = simple_open,
++	.llseek = default_llseek,
++};
++
+ #ifdef CONFIG_PM
+ static ssize_t reset_write(struct file *file, const char __user *user_buf,
+ 			   size_t count, loff_t *ppos)
+@@ -612,6 +647,7 @@ void debugfs_hw_add(struct ieee80211_loc
+ 	DEBUGFS_ADD(hw_conf);
+ 	DEBUGFS_ADD_MODE(force_tx_status, 0600);
+ 	DEBUGFS_ADD(dbg_mask);
++	DEBUGFS_ADD(enable_tx_latency_stats);
+ 
+ 	if (local->ops->wake_tx_queue)
+ 		DEBUGFS_ADD_MODE(aqm, 0600);

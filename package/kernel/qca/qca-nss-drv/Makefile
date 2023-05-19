@@ -109,10 +109,10 @@ DRV_MAKE_OPTS+=NSS_DRV_C2C_ENABLE=n \
         NSS_DRV_VXLAN_ENABLE=n \
         NSS_DRV_MATCH_ENABLE=n \
         NSS_DRV_MIRROR_ENABLE=n \
-        NSS_DRV_WIFI_EXT_VDEV_ENABLE=n \
-        NSS_DRV_WIFI_MESH_ENABLE=n \
         NSS_DRV_IPV4_REASM_ENABLE=n \
         NSS_DRV_IPV6_REASM_ENABLE=n
+        # NSS_DRV_WIFI_EXT_VDEV_ENABLE=n \
+        # NSS_DRV_WIFI_MESH_ENABLE=n \
 # Disable PPE bridge support for IPQ50xx.
 ifneq (, $(findstring $(subtarget), "ipq50xx"))
         DRV_MAKE_OPTS+=NSS_DRV_BRIDGE_ENABLE=n

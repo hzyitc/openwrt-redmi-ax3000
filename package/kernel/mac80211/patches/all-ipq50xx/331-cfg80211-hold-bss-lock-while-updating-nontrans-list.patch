@@ -1,0 +1,39 @@
+From 5085d00b2b14f9d8852ce6899deb628fa020c4f5 Mon Sep 17 00:00:00 2001
+From: Rameshkumar Sundaram <ramess@codeaurora.org>
+Date: Mon, 4 Oct 2021 15:58:29 +0530
+Subject: [PATCH] cfg80211: hold bss lock while updating nontrans list
+
+Synchronize additions to nontrans list of transmitting bss
+with bss_lock to avoid races.
+Also while cfg80211_add_nontrans_list fails
+__cfg80211_unlink_bss needs bss lock to be held
+(has lockdep assert on bss_lock).
+so protect the whole block with bss_lock
+to avoid races and warnings.
+
+Signed-off-by: Rameshkumar Sundaram <ramess@codeaurora.org>
+---
+ net/wireless/scan.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/net/wireless/scan.c b/net/wireless/scan.c
+index 272b1c5..c54a881 100644
+--- a/net/wireless/scan.c
++++ b/net/wireless/scan.c
+@@ -1959,11 +1959,13 @@ cfg80211_inform_single_bss_data(struct wiphy *wiphy,
+ 		/* this is a nontransmitting bss, we need to add it to
+ 		 * transmitting bss' list if it is not there
+ 		 */
++		spin_lock_bh(&rdev->bss_lock);
+ 		if (cfg80211_add_nontrans_list(non_tx_data->tx_bss,
+ 					       &res->pub)) {
+ 			if (__cfg80211_unlink_bss(rdev, res))
+ 				rdev->bss_generation++;
+ 		}
++		spin_unlock_bh(&rdev->bss_lock);
+ 	}
+ 
+ 	trace_cfg80211_return_bss(&res->pub);
+-- 
+2.7.4
+

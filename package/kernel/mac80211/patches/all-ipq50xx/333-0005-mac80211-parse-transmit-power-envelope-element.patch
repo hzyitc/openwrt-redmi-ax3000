@@ -1,0 +1,61 @@
+From 9ffad8cd08056f10167cfd4c591da43ef02fef6b Mon Sep 17 00:00:00 2001
+From: Wen Gong <quic_wgong@quicinc.com>
+Date: Tue, 2 Nov 2021 13:39:59 +0530
+Subject: [PATCH] mac80211: parse transmit power envelope element
+
+Parse and store the transmit power envelope element.
+
+Signed-off-by: Wen Gong <quic_wgong@quicinc.com>
+Signed-off-by: Aditya Kumar Singh <quic_adisi@quicinc.com>
+---
+ net/mac80211/ieee80211_i.h |  3 +++
+ net/mac80211/util.c        | 12 ++++++++++++
+ 2 files changed, 15 insertions(+)
+
+diff --git a/net/mac80211/ieee80211_i.h b/net/mac80211/ieee80211_i.h
+index 200d325..8b1c354 100644
+--- a/net/mac80211/ieee80211_i.h
++++ b/net/mac80211/ieee80211_i.h
+@@ -1537,6 +1537,7 @@ struct ieee802_11_elems {
+ 	const struct ieee80211_he_spr *he_spr;
+ 	const struct ieee80211_mu_edca_param_set *mu_edca_param_set;
+ 	const struct ieee80211_he_6ghz_capa *he_6ghz_capa;
++	const struct ieee80211_tx_pwr_env *tx_pwr_env[IEEE80211_TPE_MAX_IE_COUNT];
+ 	const u8 *uora_element;
+ 	const u8 *mesh_id;
+ 	const u8 *peering;
+@@ -1587,6 +1588,8 @@ struct ieee802_11_elems {
+ 	u8 perr_len;
+ 	u8 country_elem_len;
+ 	u8 bssid_index_len;
++	u8 tx_pwr_env_len[IEEE80211_TPE_MAX_IE_COUNT];
++	u8 tx_pwr_env_num;
+ 
+ 	/* whether a parse error occurred while retrieving these elements */
+ 	bool parse_error;
+diff --git a/net/mac80211/util.c b/net/mac80211/util.c
+index 9c58109..7cebaa8 100644
+--- a/net/mac80211/util.c
++++ b/net/mac80211/util.c
+@@ -1338,6 +1338,18 @@ _ieee802_11_parse_elems_crc(const u8 *start, size_t len, bool action,
+ 			elems->rsnx = pos;
+ 			elems->rsnx_len = elen;
+ 			break;
++		case WLAN_EID_TX_POWER_ENVELOPE:
++			if (elen < 1 ||
++			    elen > sizeof(struct ieee80211_tx_pwr_env))
++				break;
++
++			if (elems->tx_pwr_env_num >= ARRAY_SIZE(elems->tx_pwr_env))
++				break;
++
++			elems->tx_pwr_env[elems->tx_pwr_env_num] = (void *)pos;
++			elems->tx_pwr_env_len[elems->tx_pwr_env_num] = elen;
++			elems->tx_pwr_env_num++;
++			break;
+ 		case WLAN_EID_EXTENSION:
+ 			ieee80211_parse_extension_element(calc_crc ?
+ 								&crc : NULL,
+-- 
+2.7.4
+

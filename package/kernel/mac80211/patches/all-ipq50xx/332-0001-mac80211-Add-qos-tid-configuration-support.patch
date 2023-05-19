@@ -1,0 +1,275 @@
+From b48e2c7f8fdab7d83a358a66b2e1a7efd216721e Mon Sep 17 00:00:00 2001
+From: Sowmiya Sree Elavalagan <quic_ssreeela@quicinc.com>
+Date: Sun, 10 Oct 2021 23:17:03 +0530
+Subject: [PATCH 1/2] mac80211: Add qos tid configuration support
+
+Configuration per tid per peer or per vap is pushed via iw
+command to the driver. Added nl and mac80211 layer changes to
+support new nl attribute for ampdu and amsdu count.
+In addition added support to configure rtscts for unicast
+management frames
+
+Signed-off-by: Sowmiya Sree Elavalagan <quic_ssreeela@quicinc.com>
+---
+ include/net/cfg80211.h       |  4 ++++
+ include/net/mac80211.h       |  4 ++++
+ include/uapi/linux/nl80211.h | 12 ++++++++++++
+ net/mac80211/cfg.c           |  7 +++++++
+ net/mac80211/driver-ops.c    | 22 ++++++++++++++++++++++
+ net/mac80211/driver-ops.h    |  5 +++++
+ net/mac80211/trace.h         | 29 +++++++++++++++++++++++++++++
+ net/wireless/nl80211.c       | 30 ++++++++++++++++++++++++++----
+ 8 files changed, 109 insertions(+), 4 deletions(-)
+
+--- a/include/net/cfg80211.h
++++ b/include/net/cfg80211.h
+@@ -748,6 +748,8 @@ struct cfg80211_tid_cfg {
+ 	enum nl80211_tid_config amsdu;
+ 	enum nl80211_tx_rate_setting txrate_type;
+ 	struct cfg80211_bitrate_mask txrate_mask;
++	u16 ampdu_count;
++	u16 amsdu_count;
+ };
+ 
+ /**
+@@ -1358,6 +1360,7 @@ enum station_parameters_apply_mask {
+ 	STATION_PARAM_APPLY_CAPABILITY = BIT(1),
+ 	STATION_PARAM_APPLY_PLINK_STATE = BIT(2),
+ 	STATION_PARAM_APPLY_STA_TXPOWER = BIT(3),
++	STATION_PARAM_APPLY_MGMT_RTS_CTS = BIT(4),
+ };
+ 
+ /**
+@@ -1456,6 +1459,7 @@ struct station_parameters {
+ 	const struct ieee80211_he_cap_elem *he_capa;
+ 	u8 he_capa_len;
+ 	u16 airtime_weight;
++	enum nl80211_mgmt_rts_cts_conf mgmt_rts_cts;
+ 	struct sta_txpwr txpwr;
+ 	const struct ieee80211_he_6ghz_capa *he_6ghz_capa;
+ };
+--- a/include/net/mac80211.h
++++ b/include/net/mac80211.h
+@@ -2205,6 +2205,7 @@ struct ieee80211_sta {
+ 	bool support_p2p_ps;
+ 	u16 max_rc_amsdu_len;
+ 	u16 max_tid_amsdu_len[IEEE80211_NUM_TIDS];
++	enum nl80211_mgmt_rts_cts_conf mgmt_rts_cts;
+ 	struct ieee80211_sta_txpwr txpwr;
+ 
+ 	struct ieee80211_txq *txq[IEEE80211_NUM_TIDS + 1];
+@@ -4099,6 +4100,9 @@ struct ieee80211_ops {
+ 	int (*sta_set_txpwr)(struct ieee80211_hw *hw,
+ 			     struct ieee80211_vif *vif,
+ 			     struct ieee80211_sta *sta);
++	int (*sta_set_mgmt_rts_cts)(struct ieee80211_hw *hw,
++				    struct ieee80211_vif *vif,
++				    struct ieee80211_sta *sta);
+ 	int (*sta_state)(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+ 			 struct ieee80211_sta *sta,
+ 			 enum ieee80211_sta_state old_state,
+--- a/include/uapi/linux/nl80211.h
++++ b/include/uapi/linux/nl80211.h
+@@ -3154,6 +3154,10 @@ enum nl80211_attrs {
+ 
+ 	NL80211_ATTR_BEACON_TX_MODE,
+ 
++	NL80211_ATTR_WIPHY_ANTENNA_GAIN,
++
++	NL80211_ATTR_STA_MGMT_RTS_CTS_CONFIG,
++
+ 	/* add attributes here, update the policy in nl80211.c */
+ 
+ 	__NL80211_ATTR_AFTER_LAST,
+@@ -4329,6 +4333,11 @@ enum nl80211_mesh_power_mode {
+ 	NL80211_MESH_POWER_MAX = __NL80211_MESH_POWER_AFTER_LAST - 1
+ };
+ 
++enum nl80211_mgmt_rts_cts_conf {
++	NL80211_MGMT_RTS_CTS_ENABLE,
++	NL80211_MGMT_RTS_CTS_DISABLE,
++};
++
+ /**
+  * enum nl80211_meshconf_params - mesh configuration parameters
+  *
+@@ -5175,6 +5184,8 @@ enum nl80211_tid_config_attr {
+ 	NL80211_TID_CONFIG_ATTR_AMSDU_CTRL,
+ 	NL80211_TID_CONFIG_ATTR_TX_RATE_TYPE,
+ 	NL80211_TID_CONFIG_ATTR_TX_RATE,
++	NL80211_TID_CONFIG_ATTR_AMPDU_COUNT,
++	NL80211_TID_CONFIG_ATTR_AMSDU_COUNT,
+ 
+ 	/* keep last */
+ 	__NL80211_TID_CONFIG_ATTR_AFTER_LAST,
+@@ -6117,6 +6128,7 @@ enum nl80211_ext_feature_index {
+ 	NL80211_EXT_FEATURE_BEACON_RATE_HE,
+ 	NL80211_EXT_FEATURE_WIDE_BAND_SCAN,
+ 	NL80211_EXT_FEATURE_BSS_COLOR,
++	NL80211_EXT_FEATURE_STA_MGMT_RTS_CTS,
+ 
+ 	/* add new features before the definition below */
+ 	NUM_NL80211_EXT_FEATURES,
+--- a/net/mac80211/cfg.c
++++ b/net/mac80211/cfg.c
+@@ -1759,6 +1759,13 @@ static int sta_apply_parameters(struct i
+ 			return ret;
+ 	}
+ 
++	if (params->sta_modify_mask & STATION_PARAM_APPLY_MGMT_RTS_CTS) {
++		sta->sta.mgmt_rts_cts = params->mgmt_rts_cts;
++		ret = drv_sta_set_mgmt_rts_cts(local, sdata, sta);
++		if (ret)
++			return ret;
++	}
++
+ 	if (params->supported_rates && params->supported_rates_len) {
+ 		ieee80211_parse_bitrates(&sdata->vif.bss_conf.chandef,
+ 					 sband, params->supported_rates,
+--- a/net/mac80211/driver-ops.c
++++ b/net/mac80211/driver-ops.c
+@@ -162,6 +162,27 @@ int drv_sta_set_txpwr(struct ieee80211_l
+ 	return ret;
+ }
+ 
++__must_check
++int drv_sta_set_mgmt_rts_cts(struct ieee80211_local *local,
++			     struct ieee80211_sub_if_data *sdata,
++			     struct sta_info *sta)
++{
++	int ret = -EOPNOTSUPP;
++
++	might_sleep();
++
++	sdata = get_bss_sdata(sdata);
++	if (!check_sdata_in_driver(sdata))
++		return -EIO;
++
++	trace_drv_sta_set_mgmt_rts_cts(local, sdata, &sta->sta);
++	if (local->ops->sta_set_mgmt_rts_cts)
++		ret = local->ops->sta_set_mgmt_rts_cts(&local->hw, &sdata->vif,
++						&sta->sta);
++	trace_drv_return_int(local, ret);
++	return ret;
++}
++
+ void drv_sta_rc_update(struct ieee80211_local *local,
+ 		       struct ieee80211_sub_if_data *sdata,
+ 		       struct ieee80211_sta *sta, u32 changed)
+--- a/net/mac80211/driver-ops.h
++++ b/net/mac80211/driver-ops.h
+@@ -552,6 +552,11 @@ int drv_sta_set_txpwr(struct ieee80211_l
+ 		      struct ieee80211_sub_if_data *sdata,
+ 		      struct sta_info *sta);
+ 
++__must_check
++int drv_sta_set_mgmt_rts_cts(struct ieee80211_local *local,
++			     struct ieee80211_sub_if_data *sdata,
++			     struct sta_info *sta);
++
+ void drv_sta_rc_update(struct ieee80211_local *local,
+ 		       struct ieee80211_sub_if_data *sdata,
+ 		       struct ieee80211_sta *sta, u32 changed);
+--- a/net/mac80211/trace.h
++++ b/net/mac80211/trace.h
+@@ -903,6 +903,34 @@ TRACE_EVENT(drv_sta_set_txpwr,
+ 	)
+ );
+ 
++TRACE_EVENT(drv_sta_set_mgmt_rts_cts,
++	TP_PROTO(struct ieee80211_local *local,
++		 struct ieee80211_sub_if_data *sdata,
++		 struct ieee80211_sta *sta),
++
++	TP_ARGS(local, sdata, sta),
++
++	TP_STRUCT__entry(
++		LOCAL_ENTRY
++		VIF_ENTRY
++		STA_ENTRY
++		__field(u8, mgmt_rts_cts)
++	),
++
++	TP_fast_assign(
++		LOCAL_ASSIGN;
++		VIF_ASSIGN;
++		STA_ASSIGN;
++		__entry->mgmt_rts_cts = sta->mgmt_rts_cts;
++	),
++
++	TP_printk(
++		LOCAL_PR_FMT  VIF_PR_FMT  STA_PR_FMT " mgmt_rts_cts: %d",
++		LOCAL_PR_ARG, VIF_PR_ARG, STA_PR_ARG,
++		__entry->mgmt_rts_cts
++	)
++);
++
+ TRACE_EVENT(drv_sta_rc_update,
+ 	TP_PROTO(struct ieee80211_local *local,
+ 		 struct ieee80211_sub_if_data *sdata,
+--- a/net/wireless/nl80211.c
++++ b/net/wireless/nl80211.c
+@@ -406,7 +406,9 @@ nl80211_tid_config_attr_policy[NL80211_T
+ 	[NL80211_TID_CONFIG_ATTR_TX_RATE_TYPE] =
+ 			NLA_POLICY_MAX(NLA_U8, NL80211_TX_RATE_FIXED),
+ 	[NL80211_TID_CONFIG_ATTR_TX_RATE] =
+-			NLA_POLICY_NESTED(nl80211_txattr_policy),
++			NLA_POLICY_NESTED_ARRAY(nl80211_txattr_policy),
++	[NL80211_TID_CONFIG_ATTR_AMPDU_COUNT] = { .type = NLA_U16 },
++	[NL80211_TID_CONFIG_ATTR_AMSDU_COUNT] = { .type = NLA_U16 },
+ };
+ 
+ static const struct nla_policy
+@@ -798,7 +800,8 @@ static const struct nla_policy nl80211_p
+ 	[NL80211_ATTR_COLOR_CHANGE_ANNOUNCEMENT_IES] = NLA_POLICY_NESTED(nl80211_policy),
+ 	[NL80211_ATTR_RNR_OFFSETS] = NLA_POLICY_NESTED(nl80211_rnr_ies_policy),
+ 	[NL80211_ATTR_BEACON_TX_MODE] = NLA_POLICY_RANGE(NLA_U32, 1, 2),
+-
++	[NL80211_ATTR_STA_MGMT_RTS_CTS_CONFIG] =
++					NLA_POLICY_MAX(NLA_U8, NL80211_MGMT_RTS_CTS_DISABLE),
+ };
+ 
+ /* policy for the key attributes */
+@@ -6601,6 +6604,16 @@ static int nl80211_set_station(struct sk
+ 				     NL80211_EXT_FEATURE_AIRTIME_FAIRNESS))
+ 		return -EOPNOTSUPP;
+ 
++	if (info->attrs[NL80211_ATTR_STA_MGMT_RTS_CTS_CONFIG]) {
++		if (!wiphy_ext_feature_isset(&rdev->wiphy,
++					     NL80211_EXT_FEATURE_STA_MGMT_RTS_CTS))
++			return -EOPNOTSUPP;
++
++		params.mgmt_rts_cts =
++			nla_get_u8(info->attrs[NL80211_ATTR_STA_MGMT_RTS_CTS_CONFIG]);
++		params.sta_modify_mask |= STATION_PARAM_APPLY_MGMT_RTS_CTS;
++	}
++
+ 	err = nl80211_parse_sta_txpower_setting(info, &params);
+ 	if (err)
+ 		return err;
+@@ -14849,6 +14862,12 @@ static int parse_tid_conf(struct cfg8021
+ 		tid_conf->mask |= BIT(NL80211_TID_CONFIG_ATTR_AMPDU_CTRL);
+ 		tid_conf->ampdu =
+ 			nla_get_u8(attrs[NL80211_TID_CONFIG_ATTR_AMPDU_CTRL]);
++
++		if (attrs[NL80211_TID_CONFIG_ATTR_AMPDU_COUNT]) {
++			tid_conf->mask |= BIT(NL80211_TID_CONFIG_ATTR_AMPDU_COUNT);
++			tid_conf->ampdu_count =
++				nla_get_u16(attrs[NL80211_TID_CONFIG_ATTR_AMPDU_COUNT]);
++		}
+ 	}
+ 
+ 	if (attrs[NL80211_TID_CONFIG_ATTR_RTSCTS_CTRL]) {
+@@ -14861,6 +14880,12 @@ static int parse_tid_conf(struct cfg8021
+ 		tid_conf->mask |= BIT(NL80211_TID_CONFIG_ATTR_AMSDU_CTRL);
+ 		tid_conf->amsdu =
+ 			nla_get_u8(attrs[NL80211_TID_CONFIG_ATTR_AMSDU_CTRL]);
++
++		if (attrs[NL80211_TID_CONFIG_ATTR_AMSDU_COUNT]) {
++			tid_conf->mask |= BIT(NL80211_TID_CONFIG_ATTR_AMSDU_COUNT);
++			tid_conf->amsdu_count =
++				nla_get_u16(attrs[NL80211_TID_CONFIG_ATTR_AMSDU_COUNT]);
++		}
+ 	}
+ 
+ 	if (attrs[NL80211_TID_CONFIG_ATTR_TX_RATE_TYPE]) {

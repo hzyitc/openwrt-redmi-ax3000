@@ -1,0 +1,242 @@
+From 69be0c192eba71f6a5411d03d486c7f59d567621 Mon Sep 17 00:00:00 2001
+From: Seevalamuthu Mariappan <seevalam@codeaurora.org>
+Date: Tue, 23 Mar 2021 17:51:12 +0530
+Subject: [PATCH] ath11k: add 177 channel to 5G channel list
+
+Signed-off-by: Seevalamuthu Mariappan <seevalam@codeaurora.org>
+---
+ drivers/net/wireless/ath/ath11k/core.h | 4 ++--
+ drivers/net/wireless/ath/ath11k/mac.c  | 1 +
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -472,11 +472,17 @@ struct ath11k_sta {
+ #endif
+ };
+ 
+-#define ATH11K_MIN_5G_FREQ 4150
+-#define ATH11K_MIN_6G_FREQ 5925
+-#define ATH11K_MAX_6G_FREQ 7125
+-#define ATH11K_NUM_CHANS 101
+-#define ATH11K_MAX_5G_CHAN 173
++#define ATH11K_HALF_20MHZ_BW 10
++#define ATH11K_5G_MIN_CENTER 4900
++#define ATH11K_5G_MAX_CENTER 5920
++#define ATH11K_6G_MIN_CENTER 5935
++#define ATH11K_6G_MAX_CENTER 7115
++#define ATH11K_MIN_5G_FREQ (ATH11K_5G_MIN_CENTER - ATH11K_HALF_20MHZ_BW)
++#define ATH11K_MAX_5G_FREQ (ATH11K_5G_MAX_CENTER + ATH11K_HALF_20MHZ_BW)
++#define ATH11K_MIN_6G_FREQ (ATH11K_6G_MIN_CENTER - ATH11K_HALF_20MHZ_BW)
++#define ATH11K_MAX_6G_FREQ (ATH11K_6G_MAX_CENTER + ATH11K_HALF_20MHZ_BW)
++#define ATH11K_NUM_CHANS 102
++#define ATH11K_MAX_5G_CHAN 177
+ 
+ enum ath11k_state {
+ 	ATH11K_STATE_OFF,
+@@ -869,6 +875,11 @@ struct ath11k_memory_stats {
+ 	atomic_t ce_rx_pipe;
+ };
+ 
++struct ath11k_reg_rule {
++	u32 start_freq;
++	u32 end_freq;
++};
++
+ /* Master structure to hold the hw data which may be used in core module */
+ struct ath11k_base {
+ 	enum ath11k_hw_rev hw_rev;
+@@ -944,6 +955,9 @@ struct ath11k_base {
+ 
+ 	/* Current DFS Regulatory */
+ 	enum ath11k_dfs_region dfs_region;
++	struct ath11k_reg_rule reg_rule_2g;
++	struct ath11k_reg_rule reg_rule_5g;
++	struct ath11k_reg_rule reg_rule_6g;
+ #ifdef CPTCFG_ATH11K_DEBUGFS
+ 	struct dentry *debugfs_soc;
+ 	struct ath11k_memory_stats memory_stats;
+--- a/drivers/net/wireless/ath/ath11k/reg.c
++++ b/drivers/net/wireless/ath/ath11k/reg.c
+@@ -507,6 +507,17 @@ ath11k_reg_update_weather_radar_band(str
+ 	*rule_idx = i;
+ }
+ 
++static void ath11k_copy_reg_rule(struct ath11k_reg_rule *ath11k_reg_rule,
++				 struct cur_reg_rule *reg_rule)
++{
++	if (!ath11k_reg_rule->start_freq)
++		ath11k_reg_rule->start_freq = reg_rule->start_freq;
++
++	if ((!ath11k_reg_rule->end_freq) ||
++	    (ath11k_reg_rule->end_freq < reg_rule->end_freq))
++		ath11k_reg_rule->end_freq = reg_rule->end_freq;
++}
++
+ struct ieee80211_regdomain *
+ ath11k_reg_build_regd(struct ath11k_base *ab,
+ 		      struct cur_regulatory_info *reg_info, bool intersect)
+@@ -560,6 +571,7 @@ ath11k_reg_build_regd(struct ath11k_base
+ 			max_bw = min_t(u16, reg_rule->max_bw,
+ 				       reg_info->max_bw_2g);
+ 			flags = 0;
++			ath11k_copy_reg_rule(&ab->reg_rule_2g, reg_rule);
+ 		} else if (reg_info->num_5g_reg_rules &&
+ 			   (j < reg_info->num_5g_reg_rules)) {
+ 			reg_rule = reg_info->reg_rules_5g_ptr + j++;
+@@ -573,12 +585,19 @@ ath11k_reg_build_regd(struct ath11k_base
+ 			 * per other BW rule flags we pass from here
+ 			 */
+ 			flags = NL80211_RRF_AUTO_BW;
++
++			if (reg_rule->end_freq <= ATH11K_MAX_5G_FREQ)
++				ath11k_copy_reg_rule(&ab->reg_rule_5g, reg_rule);
++			else if (reg_rule->start_freq >= ATH11K_MIN_6G_FREQ)
++				ath11k_copy_reg_rule(&ab->reg_rule_6g, reg_rule);
++
+ 		} else if (reg_info->is_ext_reg_event && reg_info->num_6g_reg_rules_ap[WMI_REG_INDOOR_AP] &&
+ 			(k < reg_info->num_6g_reg_rules_ap[WMI_REG_INDOOR_AP])) {
+ 			reg_rule = reg_info->reg_rules_6g_ap_ptr[WMI_REG_INDOOR_AP] + k++;
+ 			max_bw = min_t(u16, reg_rule->max_bw,
+ 					reg_info->max_bw_6g_ap[WMI_REG_INDOOR_AP]);
+ 			flags = NL80211_RRF_AUTO_BW;
++			ath11k_copy_reg_rule(&ab->reg_rule_6g, reg_rule);
+ 		} else {
+ 			break;
+ 		}
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -2912,7 +2912,7 @@ static void ath11k_dp_rx_h_ppdu(struct a
+ 		rx_status->band = NL80211_BAND_6GHZ;
+ 	} else if (channel_num >= 1 && channel_num <= 14) {
+ 		rx_status->band = NL80211_BAND_2GHZ;
+-	} else if (channel_num >= 36 && channel_num <= 173) {
++	} else if (channel_num >= 36 && channel_num <= 177) {
+ 		rx_status->band = NL80211_BAND_5GHZ;
+ 	} else {
+ 		spin_lock_bh(&ar->data_lock);
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -95,6 +95,7 @@ static const struct ieee80211_channel at
+ 	CHAN5G(165, 5825, 0),
+ 	CHAN5G(169, 5845, 0),
+ 	CHAN5G(173, 5865, 0),
++	CHAN5G(177, 5885, 0),
+ };
+ 
+ static const struct ieee80211_channel ath11k_6ghz_channels[] = {
+@@ -8675,6 +8676,7 @@ static u32 ath11k_get_phy_id(struct ath1
+ static int ath11k_mac_setup_channels_rates(struct ath11k *ar,
+ 					   u32 supported_bands)
+ {
++	struct ath11k_base *ab = ar->ab;
+ 	struct ieee80211_supported_band *band;
+ 	struct ath11k_hal_reg_capabilities_ext *reg_cap;
+ 	void *channels;
+@@ -8685,7 +8687,7 @@ static int ath11k_mac_setup_channels_rat
+ 		      ARRAY_SIZE(ath11k_6ghz_channels)) !=
+ 		     ATH11K_NUM_CHANS);
+ 
+-	reg_cap = &ar->ab->hal_reg_cap[ar->pdev_idx];
++	reg_cap = &ab->hal_reg_cap[ar->pdev_idx];
+ 
+ 	if (supported_bands & WMI_HOST_WLAN_2G_CAP) {
+ 		channels = kmemdup(ath11k_2ghz_channels,
+@@ -8702,40 +8704,24 @@ static int ath11k_mac_setup_channels_rat
+ 		band->bitrates = ath11k_g_rates;
+ 		ar->hw->wiphy->bands[NL80211_BAND_2GHZ] = band;
+ 
+-		if (ar->ab->hw_params.single_pdev_only) {
++		if (ab->hw_params.single_pdev_only) {
+ 			phy_id = ath11k_get_phy_id(ar, WMI_HOST_WLAN_2G_CAP);
+-			reg_cap = &ar->ab->hal_reg_cap[phy_id];
++			reg_cap = &ab->hal_reg_cap[phy_id];
+ 		}
+ 		ath11k_mac_update_ch_list(ar, band,
+-					  reg_cap->low_2ghz_chan,
+-					  reg_cap->high_2ghz_chan);
++					  max(reg_cap->low_2ghz_chan,
++					      ab->reg_rule_2g.start_freq),
++					  min(reg_cap->high_2ghz_chan,
++					      ab->reg_rule_2g.end_freq));
+ 	}
+ 
+ 	if (supported_bands & WMI_HOST_WLAN_5G_CAP) {
+-		if (reg_cap->high_5ghz_chan > ATH11K_MIN_6G_FREQ &&
+-		    reg_cap->high_5ghz_chan <= ATH11K_MAX_6G_FREQ) {
+-			channels = kmemdup(ath11k_6ghz_channels,
+-					   sizeof(ath11k_6ghz_channels), GFP_KERNEL);
+-			if (!channels) {
+-				kfree(ar->mac.sbands[NL80211_BAND_2GHZ].channels);
+-				return -ENOMEM;
+-			}
+-
+-			ar->supports_6ghz = true;
+-			band = &ar->mac.sbands[NL80211_BAND_6GHZ];
+-			band->band = NL80211_BAND_6GHZ;
+-			band->n_channels = ARRAY_SIZE(ath11k_6ghz_channels);
+-			band->channels = channels;
+-			band->n_bitrates = ath11k_a_rates_size;
+-			band->bitrates = ath11k_a_rates;
+-			ar->hw->wiphy->bands[NL80211_BAND_6GHZ] = band;
+-			ath11k_mac_update_ch_list(ar, band,
+-						  reg_cap->low_5ghz_chan,
+-						  reg_cap->high_5ghz_chan);
+-		}
+-
+-		if (reg_cap->low_5ghz_chan < ATH11K_MIN_6G_FREQ &&
+-		    reg_cap->low_5ghz_chan >= ATH11K_MIN_5G_FREQ) {
++		/* If 5g end and 6g start overlaps, decide band based on
++		 * the difference between target limit and ATH11K_5G_MAX_CENTER.
++		 */
++		if ((reg_cap->low_5ghz_chan >= ATH11K_MIN_5G_FREQ) &&
++		    ((reg_cap->high_5ghz_chan < ATH11K_MAX_5G_FREQ) ||
++		    ((reg_cap->high_5ghz_chan - ATH11K_5G_MAX_CENTER) < (ATH11K_HALF_20MHZ_BW * 2)))) {
+ 			channels = kmemdup(ath11k_5ghz_channels,
+ 					   sizeof(ath11k_5ghz_channels),
+ 					   GFP_KERNEL);
+@@ -8753,16 +8739,40 @@ static int ath11k_mac_setup_channels_rat
+ 			band->bitrates = ath11k_a_rates;
+ 			ar->hw->wiphy->bands[NL80211_BAND_5GHZ] = band;
+ 
+-			if (ar->ab->hw_params.single_pdev_only) {
++			if (ab->hw_params.single_pdev_only) {
+ 				phy_id = ath11k_get_phy_id(ar, WMI_HOST_WLAN_5G_CAP);
+-				reg_cap = &ar->ab->hal_reg_cap[phy_id];
++				reg_cap = &ab->hal_reg_cap[phy_id];
+ 			}
+ 
+ 			ath11k_mac_update_ch_list(ar, band,
+-						  reg_cap->low_5ghz_chan,
+-						  reg_cap->high_5ghz_chan);
++						  max(reg_cap->low_5ghz_chan,
++						      ab->reg_rule_5g.start_freq),
++						  min(reg_cap->high_5ghz_chan,
++						      ab->reg_rule_5g.end_freq));
+ 
+ 			ath11k_mac_update_5_dot_9_ch_list(ar, band);
++		} else if (reg_cap->low_5ghz_chan >= ATH11K_MIN_6G_FREQ &&
++		    	   reg_cap->high_5ghz_chan <= ATH11K_MAX_6G_FREQ) {
++			channels = kmemdup(ath11k_6ghz_channels,
++					   sizeof(ath11k_6ghz_channels), GFP_KERNEL);
++			if (!channels) {
++				kfree(ar->mac.sbands[NL80211_BAND_2GHZ].channels);
++				return -ENOMEM;
++			}
++
++			ar->supports_6ghz = true;
++			band = &ar->mac.sbands[NL80211_BAND_6GHZ];
++			band->band = NL80211_BAND_6GHZ;
++			band->n_channels = ARRAY_SIZE(ath11k_6ghz_channels);
++			band->channels = channels;
++			band->n_bitrates = ath11k_a_rates_size;
++			band->bitrates = ath11k_a_rates;
++			ar->hw->wiphy->bands[NL80211_BAND_6GHZ] = band;
++			ath11k_mac_update_ch_list(ar, band,
++						  max(reg_cap->low_5ghz_chan,
++						      ab->reg_rule_6g.start_freq),
++						  min(reg_cap->high_5ghz_chan,
++						      ab->reg_rule_6g.end_freq));
+ 		}
+ 	}
+ 

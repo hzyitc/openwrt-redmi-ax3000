@@ -1,0 +1,98 @@
+From 9c37c7cfc02e0643c3379daa317f845731d0d7dc Mon Sep 17 00:00:00 2001
+From: Wen Gong <quic_wgong@quicinc.com>
+Date: Tue, 2 Nov 2021 17:26:50 +0530
+Subject: [PATCH] mac80211: save transmit power envelope element and power
+ constraint
+
+This is to save the transmit power envelope element and power
+constraint in struct ieee80211_bss_conf for 6 GHz. Lower driver
+will use this info to calculate the power limit.
+
+Signed-off-by: Wen Gong <quic_wgong@quicinc.com>
+Signed-off-by: Aditya Kumar Singh <quic_adisi@quicinc.com>
+---
+ include/net/mac80211.h |  6 ++++++
+ net/mac80211/mlme.c    | 29 +++++++++++++++++++++++++++++
+ 2 files changed, 35 insertions(+)
+
+diff --git a/include/net/mac80211.h b/include/net/mac80211.h
+index 169f16e..ae805b1 100644
+--- a/include/net/mac80211.h
++++ b/include/net/mac80211.h
+@@ -658,6 +658,9 @@ struct ieee80211_fils_discovery {
+  * @multiple_bssid: the multiple bssid settings of the AP.
+  * @beacon_tx_mode: Beacon Tx Mode setting.
+  * @power_type: power type of BSS for 6 GHz
++ * @tx_pwr_env: transmit power envelope array of BSS.
++ * @tx_pwr_env_num: number of @tx_pwr_env.
++ * @pwr_reduction: power constraint of BSS.
+  */
+ struct ieee80211_bss_conf {
+ 	const u8 *bssid;
+@@ -732,6 +735,9 @@ struct ieee80211_bss_conf {
+ 	struct ieee80211_multiple_bssid multiple_bssid;
+ 	enum nl80211_beacon_tx_mode beacon_tx_mode;
+ 	enum ieee80211_ap_reg_power power_type;
++	struct ieee80211_tx_pwr_env tx_pwr_env[IEEE80211_TPE_MAX_IE_COUNT];
++	u8 tx_pwr_env_num;
++	u8 pwr_reduction;
+ 
+ 	/* Mesh configuration for nss offload */
+ 	u8 nss_offld_ttl;
+diff --git a/net/mac80211/mlme.c b/net/mac80211/mlme.c
+index 0bd611d..4bad9ce 100644
+--- a/net/mac80211/mlme.c
++++ b/net/mac80211/mlme.c
+@@ -2338,6 +2338,7 @@ static void ieee80211_set_disassoc(struct ieee80211_sub_if_data *sdata,
+ {
+ 	struct ieee80211_if_managed *ifmgd = &sdata->u.mgd;
+ 	struct ieee80211_local *local = sdata->local;
++	struct ieee80211_bss_conf *bss_conf = &sdata->vif.bss_conf;
+ 	u32 changed = 0;
+ 
+ 	sdata_assert_lock(sdata);
+@@ -2481,6 +2482,10 @@ static void ieee80211_set_disassoc(struct ieee80211_sub_if_data *sdata,
+ 	cancel_delayed_work_sync(&ifmgd->tx_tspec_wk);
+ 
+ 	sdata->encrypt_headroom = IEEE80211_ENCRYPT_HEADROOM;
++
++	bss_conf->pwr_reduction = 0;
++	bss_conf->tx_pwr_env_num = 0;
++	memset(bss_conf->tx_pwr_env, 0, sizeof(bss_conf->tx_pwr_env));
+ }
+ 
+ static void ieee80211_reset_ap_probe(struct ieee80211_sub_if_data *sdata)
+@@ -5082,6 +5087,30 @@ static int ieee80211_prep_channel(struct ieee80211_sub_if_data *sdata,
+ 		else
+ 			he_oper = NULL;
+ 
++		if (is_6ghz) {
++			struct ieee80211_bss_conf *bss_conf;
++			u8 i, j = 0;
++
++			bss_conf = &sdata->vif.bss_conf;
++
++			if (elems->pwr_constr_elem)
++				bss_conf->pwr_reduction = *elems->pwr_constr_elem;
++
++			BUILD_BUG_ON(ARRAY_SIZE(bss_conf->tx_pwr_env) !=
++				     ARRAY_SIZE(elems->tx_pwr_env));
++
++			for (i = 0; i < elems->tx_pwr_env_num; i++) {
++				if (elems->tx_pwr_env_len[i] >
++				    sizeof(bss_conf->tx_pwr_env[j]))
++					continue;
++
++				bss_conf->tx_pwr_env_num++;
++				memcpy(&bss_conf->tx_pwr_env[j], elems->tx_pwr_env[i],
++				       elems->tx_pwr_env_len[i]);
++				j++;
++			}
++		}
++
+ 		if (!ieee80211_verify_sta_he_mcs_support(sband, he_oper))
+ 			ifmgd->flags |= IEEE80211_STA_DISABLE_HE;
+ 	}
+-- 
+2.7.4
+

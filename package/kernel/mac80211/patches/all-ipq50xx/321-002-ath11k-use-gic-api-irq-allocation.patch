@@ -1,0 +1,349 @@
+From 0459a4506b6655cd72a876b5296b223134dc3874 Mon Sep 17 00:00:00 2001
+From: Tamizh Chelvam <tamizhr@codeaurora.org>
+Date: Wed, 26 May 2021 11:27:25 +0530
+Subject: [PATCH] ath11k: Use gic irq related api for irq allocation
+
+Use latest GIC irq related API for allocate and request irq
+for the radio.
+
+Signed-off-by: Tamizh Chelvam <tamizhr@codeaurora.org>
+---
+ drivers/net/wireless/ath/ath11k/ahb.c  |  87 +++++++++++++++++++++++++++-
+ drivers/net/wireless/ath/ath11k/ce.c   |  10 +++-
+ drivers/net/wireless/ath/ath11k/ce.h   |   1 +
+ drivers/net/wireless/ath/ath11k/core.h |   5 ++
+ drivers/net/wireless/ath/ath11k/dp.c   |  15 ++++-
+ drivers/net/wireless/ath/ath11k/mhi.c  |   1 -
+ drivers/net/wireless/ath/ath11k/pci.c  | 102 ++++++++++++++++++++++++++++++++-
+ drivers/net/wireless/ath/ath11k/pci.h  |   5 ++
+ 8 files changed, 218 insertions(+), 8 deletions(-)
+
+--- a/drivers/net/wireless/ath/ath11k/ahb.c
++++ b/drivers/net/wireless/ath/ath11k/ahb.c
+@@ -608,12 +608,26 @@ static int ath11k_ahb_ext_irq_config(str
+ 
+ static void ath11k_internal_pci_free_irq(struct ath11k_base *ab)
+ {
++	struct platform_device *pdev = ab->pdev;
++
+ 	ath11k_pci_free_irq(ab);
++	platform_msi_domain_free_irqs(&pdev->dev);
++}
++
++static void ath11k_gicv2m_msg_handler(struct msi_desc *desc, struct msi_msg *msg)
++{
++	desc->msg.address_lo = msg->address_lo;
++	desc->msg.address_hi = msg->address_hi;
++	desc->msg.data = msg->data;
+ }
+ 
+ static int ath11k_config_irq_internal_pci(struct ath11k_base *ab)
+ {
+ 	int ret;
++	struct platform_device *pdev = ab->pdev;
++	struct msi_desc *msi_desc;
++	bool ce_done = false;
++	int i = 0;
+ 
+ 	if (ab->userpd_id != QCN6122_USERPD_0 &&
+ 	    ab->userpd_id != QCN6122_USERPD_1) {
+@@ -621,6 +635,74 @@ static int ath11k_config_irq_internal_pc
+ 		return -ENODEV;
+ 	}
+ 
++	ab->ipci.msi_cfg = &ath11k_msi_config[ATH11K_MSI_CONFIG_QCN6122];
++
++	ret = platform_msi_domain_alloc_irqs(&pdev->dev, ab->ipci.msi_cfg->total_vectors,
++					     ath11k_gicv2m_msg_handler);
++	if (ret) {
++		ath11k_warn(ab, "failed to alloc irqs %d ab %pM\n", ret, ab);
++		return ret;
++	}
++
++	for_each_msi_entry(msi_desc, &pdev->dev) {
++		if (!ce_done && i == ab->hw_params.ce_count) {
++			i = 0;
++			ce_done = true;
++		}
++
++		if (!ce_done && i < ab->hw_params.ce_count) {
++			if (ath11k_ce_get_attr_flags(ab, i) & CE_ATTR_DIS_INTR)
++				i++;
++
++			ret = ath11k_pci_config_gic_msi_irq(ab, pdev, msi_desc, i);
++			if (ret) {
++				ath11k_warn(ab, "failed to request irq %d\n", ret);
++				return ret;
++			}
++		} else {
++			ret = ath11k_pci_ext_config_gic_msi_irq(ab, pdev, msi_desc, i);
++			if (ret) {
++				ath11k_warn(ab, "failed to config ext msi irq %d\n", ret);
++				return ret;
++			}
++		}
++
++		i++;
++		ab->ipci.address_lo = msi_desc->msg.address_lo;
++		ab->ipci.address_hi = msi_desc->msg.address_hi;
++
++		if (i == 0 && !ce_done)
++			ab->ipci.gic_ep_base_data = msi_desc->msg.data;
++
++	}
++
++	for_each_msi_entry(msi_desc, &pdev->dev) {
++		u32 user_base_data = 0, base_vector = 0;
++		int vector, num_vectors = 0;
++
++		ret = ath11k_pci_get_user_msi_assignment(ab, ab->ipci.msi_cfg, 0,
++				"DP", &num_vectors, &user_base_data,
++				&base_vector);
++		if (ret < 0)
++			return ret;
++
++		vector = (i % num_vectors) + base_vector;
++
++		if (i >= ATH11K_EXT_IRQ_GRP_NUM_MAX)
++			break;
++
++		if (ab->ipci.dp_irq_num[vector] != msi_desc->irq)
++			continue;
++
++		ret = ath11k_pci_ext_config_gic_msi_irq(ab, pdev, msi_desc, i);
++		if (ret) {
++			ath11k_warn(ab, "failed to config ext msi irq %d\n", ret);
++			return ret;
++		}
++
++		i++;
++	}
++
+ 	ab->ipci.gic_enabled = 1;
+ 	wake_up(&ab->ipci.gic_msi_waitq);
+ 
+--- a/drivers/net/wireless/ath/ath11k/ce.c
++++ b/drivers/net/wireless/ath/ath11k/ce.c
+@@ -552,7 +552,10 @@ static void ath11k_ce_srng_msi_ring_para
+ 
+ 	ring_params->msi_addr = addr_lo;
+ 	ring_params->msi_addr |= (dma_addr_t)(((uint64_t)addr_hi) << 32);
+-	ring_params->msi_data = (msi_data_idx % msi_data_count) + msi_data_start;
++	if (!ab->userpd_id)
++		ring_params->msi_data = (msi_data_idx % msi_data_count) + msi_data_start;
++	else
++		ring_params->msi_data = ab->ipci.ce_msi_data[ce_id];
+ 	ring_params->flags |= HAL_SRNG_FLAGS_MSI_INTR;
+ }
+ 
+--- a/drivers/net/wireless/ath/ath11k/ce.h
++++ b/drivers/net/wireless/ath/ath11k/ce.h
+@@ -7,6 +7,7 @@
+ #define ATH11K_CE_H
+ 
+ #define CE_COUNT_MAX 12
++#define ATH11K_QCN6122_CE_COUNT	6
+ 
+ /* Byte swap data words */
+ #define CE_ATTR_BYTE_SWAP_DATA 2
+@@ -192,6 +193,7 @@ struct ath11k_ce_pipe {
+ 	struct ce_tasklet_time tracker[CE_TIME_DURATION_MAX];
+ 	u32 sched_delay_gt_500US;
+ 	u32 exec_delay_gt_500US;
++	u32 msi_data;
+ };
+ 
+ struct ath11k_ce {
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -854,6 +854,12 @@ struct ath11k_internal_pci {
+ 	const struct ath11k_msi_config *msi_cfg;
+ 	bool gic_enabled;
+ 	wait_queue_head_t gic_msi_waitq;
++	u32 address_lo;
++	u32 address_hi;
++	u32 dp_msi_data[ATH11K_EXT_IRQ_GRP_NUM_MAX];
++	u32 ce_msi_data[ATH11K_QCN6122_CE_COUNT];
++	u32 gic_ep_base_data;
++	u32 dp_irq_num[8];
+ };
+ 
+ struct ath11k_memory_stats {
+--- a/drivers/net/wireless/ath/ath11k/dp.c
++++ b/drivers/net/wireless/ath/ath11k/dp.c
+@@ -231,8 +231,14 @@ static void ath11k_dp_srng_msi_setup(str
+ 
+ 	ring_params->msi_addr = addr_lo;
+ 	ring_params->msi_addr |= (dma_addr_t)(((uint64_t)addr_hi) << 32);
+-	ring_params->msi_data = (msi_group_number % msi_data_count)
+-		+ msi_data_start;
++
++	if (!ab->userpd_id)
++		ring_params->msi_data = (msi_group_number % msi_data_count)
++					+ msi_data_start;
++	else
++		ring_params->msi_data = ab->ipci.dp_msi_data[msi_group_number];
++
++
+ 	ring_params->flags |= HAL_SRNG_FLAGS_MSI_INTR;
+ }
+ 
+--- a/drivers/net/wireless/ath/ath11k/pci.c
++++ b/drivers/net/wireless/ath/ath11k/pci.c
+@@ -3,8 +3,8 @@
+  * Copyright (c) 2019-2020 The Linux Foundation. All rights reserved.
+  */
+ 
++#include <linux/platform_device.h>
+ #include <linux/module.h>
+-#include <linux/msi.h>
+ #include <linux/pci.h>
+ 
+ #include "pci.h"
+@@ -465,7 +465,7 @@ void ath11k_pci_get_msi_address(struct a
+ void ath11k_pci_get_qgic_msi_address(struct ath11k_base *ab, u32 *msi_addr_lo,
+ 				     u32 *msi_addr_hi)
+ {
+-	*msi_addr_lo = 0;
++	*msi_addr_lo = ab->ipci.address_lo;
+ 	*msi_addr_hi = 0;
+ }
+ EXPORT_SYMBOL(ath11k_pci_get_qgic_msi_address);
+@@ -497,6 +497,7 @@ int ath11k_pci_get_user_msi_assignment(s
+ 
+ 	return -EINVAL;
+ }
++EXPORT_SYMBOL(ath11k_pci_get_user_msi_assignment);
+ 
+ void ath11k_pci_get_ce_msi_idx(struct ath11k_base *ab, u32 ce_id,
+ 			       u32 *msi_idx)
+@@ -775,11 +776,12 @@ static int ath11k_pci_ext_irq_config(str
+ {
+ 	int i, j, ret, num_vectors = 0;
+ 	u32 user_base_data = 0, base_vector = 0, base_idx;
++	struct ath11k_pci *ab_pci = ath11k_pci_priv(ab);
+ 	u8 domain_id;
+ 
+ 	domain_id = ath11k_pci_get_domain_id(ab);
+ 	base_idx = ATH11K_PCI_IRQ_CE0_OFFSET + CE_COUNT_MAX;
+-	ret = ath11k_pci_get_user_msi_assignment(ab, msi_config, msi_ep_base_data,
++	ret = ath11k_pci_get_user_msi_assignment(ab, ab_pci->msi_config, msi_ep_base_data,
+ 						 "DP", &num_vectors, &user_base_data,
+ 						 &base_vector);
+ 	if (ret < 0)
+@@ -894,6 +896,96 @@ static int ath11k_config_msi_irq(struct
+ 	return 0;
+ }
+ 
++int ath11k_pci_ext_config_gic_msi_irq(struct ath11k_base *ab, struct platform_device *pdev,
++		struct msi_desc *msi_desc, int i)
++{
++	u32 user_base_data = 0, base_vector = 0, base_idx;
++	struct ath11k_ext_irq_grp *irq_grp;
++	int j, ret = 0, num_vectors = 0;
++	u8 domain_id;
++	u32 num_irq = 0;
++
++	domain_id = ath11k_pci_get_domain_id(ab);
++	base_idx = ATH11K_PCI_IRQ_CE0_OFFSET + CE_COUNT_MAX;
++	ret = ath11k_pci_get_user_msi_assignment(ab, ab->ipci.msi_cfg, 0,
++			"DP", &num_vectors, &user_base_data,
++			&base_vector);
++	if (ret < 0)
++		return ret;
++
++	irq_grp = &ab->ext_irq_grp[i];
++	irq_grp->ab = ab;
++	irq_grp->grp_id = i;
++	init_dummy_netdev(&irq_grp->napi_ndev);
++	netif_napi_add(&irq_grp->napi_ndev, &irq_grp->napi,
++			ath11k_pci_ext_grp_napi_poll, NAPI_POLL_WEIGHT);
++
++	if (ab->hw_params.ring_mask->tx[i] ||
++			ab->hw_params.ring_mask->rx[i] ||
++			ab->hw_params.ring_mask->rx_err[i] ||
++			ab->hw_params.ring_mask->rx_wbm_rel[i] ||
++			ab->hw_params.ring_mask->reo_status[i] ||
++			ab->hw_params.ring_mask->rxdma2host[i] ||
++			ab->hw_params.ring_mask->host2rxdma[i] ||
++			ab->hw_params.ring_mask->rx_mon_status[i]) {
++		num_irq = 1;
++	}
++
++	irq_grp->num_irq = num_irq;
++	irq_grp->irqs[0] = base_idx + i;
++
++	for (j = 0; j < irq_grp->num_irq; j++) {
++
++		int irq_idx = irq_grp->irqs[j];
++		int vector = (i % num_vectors) + base_vector;
++
++		irq_set_status_flags(msi_desc->irq, IRQ_DISABLE_UNLAZY);
++		ret = devm_request_irq(&pdev->dev, msi_desc->irq,
++				ath11k_pci_ext_interrupt_handler,
++				IRQF_SHARED, dp_irq_name[domain_id][i],
++				irq_grp);
++		if (ret) {
++			ath11k_err(ab, "failed request irq %d: %d\n",
++					irq_idx, ret);
++			return ret;
++		}
++		ab->irq_num[irq_idx] = msi_desc->irq;
++		ab->ipci.dp_irq_num[vector] = msi_desc->irq;
++		ab->ipci.dp_msi_data[i] = msi_desc->msg.data;
++		disable_irq_nosync(ab->irq_num[irq_idx]);
++	}
++	return ret;
++}
++EXPORT_SYMBOL(ath11k_pci_ext_config_gic_msi_irq);
++
++int ath11k_pci_config_gic_msi_irq(struct ath11k_base *ab, struct platform_device *pdev,
++		struct msi_desc *msi_desc, int i)
++{
++	struct ath11k_ce_pipe *ce_pipe = &ab->ce.ce_pipe[i];
++	int irq_idx, ret;
++	u8 domain_id;
++
++	domain_id = ath11k_pci_get_domain_id(ab);
++	tasklet_setup(&ce_pipe->intr_tq, ath11k_pci_ce_tasklet);
++	irq_idx = ATH11K_PCI_IRQ_CE0_OFFSET + i;
++
++	ret = devm_request_irq(&pdev->dev, msi_desc->irq,
++			ath11k_pci_ce_interrupt_handler,
++			IRQF_SHARED, ce_irq_name[domain_id][i],
++			ce_pipe);
++	if (ret) {
++		ath11k_warn(ab, "failed to request irq %d: %d\n",
++				irq_idx, ret);
++		return ret;
++	}
++	ab->irq_num[irq_idx] = msi_desc->irq;
++	ab->ipci.ce_msi_data[i] = msi_desc->msg.data;
++	ath11k_pci_ce_irq_disable(ab, i);
++
++	return ret;
++}
++EXPORT_SYMBOL(ath11k_pci_config_gic_msi_irq);
++
+ static int ath11k_pci_config_irq(struct ath11k_base *ab)
+ {
+ 	int ret;
+--- a/drivers/net/wireless/ath/ath11k/pci.h
++++ b/drivers/net/wireless/ath/ath11k/pci.h
+@@ -6,6 +6,7 @@
+ #define _ATH11K_PCI_H
+ 
+ #include <linux/mhi.h>
++#include <linux/msi.h>
+ 
+ #include "core.h"
+ 
+@@ -189,4 +190,8 @@ void ath11k_pci_free_irq(struct ath11k_b
+ int ath11k_ipci_start(struct ath11k_base *ab);
+ void ath11k_ipci_write32(struct ath11k_base *ab, u32 offset, u32 value);
+ u32 ath11k_ipci_read32(struct ath11k_base *ab, u32 offset);
++int ath11k_pci_config_gic_msi_irq(struct ath11k_base *ab, struct platform_device *pdev,
++		struct msi_desc *msi_desc, int i);
++int ath11k_pci_ext_config_gic_msi_irq(struct ath11k_base *ab, struct platform_device *pdev,
++		struct msi_desc *msi_desc, int i);
+ #endif

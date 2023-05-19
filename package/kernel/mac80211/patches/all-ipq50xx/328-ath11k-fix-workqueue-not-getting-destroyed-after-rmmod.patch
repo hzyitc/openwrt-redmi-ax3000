@@ -1,0 +1,38 @@
+From 856372c2e30917a1603d338992c9bc3c4fe2e6d0 Mon Sep 17 00:00:00 2001
+From: Aditya Kumar Singh <adisi@codeaurora.org>
+Date: Mon, 13 Sep 2021 09:32:32 +0530
+Subject: [PATCH] ath11k: fix workqueue not getting destroyed after rmmod
+
+This change is to destroy the workqueues after the modules
+are removed from kernel. Earlier, the workqueues were
+not destroyed and left as it is.
+
+If workqueues are not destroyed, it could lead to kernel
+memory scarcity in a longer run. This could affect self and
+other drivers workability as well.
+
+Signed-off-by: Aditya Kumar Singh <adisi@codeaurora.org>
+---
+ drivers/net/wireless/ath/ath11k/core.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/drivers/net/wireless/ath/ath11k/core.c b/drivers/net/wireless/ath/ath11k/core.c
+index 383f6e1..769b0eb 100644
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -1528,6 +1528,12 @@ EXPORT_SYMBOL(ath11k_core_deinit);
+ 
+ void ath11k_core_free(struct ath11k_base *ab)
+ {
++	flush_workqueue(ab->workqueue_aux);
++	destroy_workqueue(ab->workqueue_aux);
++
++	flush_workqueue(ab->workqueue);
++	destroy_workqueue(ab->workqueue);
++
+ 	kfree(ab);
+ }
+ EXPORT_SYMBOL(ath11k_core_free);
+-- 
+2.7.4
+

@@ -1,0 +1,90 @@
+From 1df50bcbe397d37bed44f9c5ce3c6fa54b39bbac Mon Sep 17 00:00:00 2001
+From: Wen Gong <quic_wgong@quicinc.com>
+Date: Tue, 2 Nov 2021 12:23:04 +0530
+Subject: [PATCH] ieee80211: add power type definition for 6 GHz
+
+6 GHz regulatory domains introduces different modes for 6 GHz AP
+operations: Low Power Indoor (LPI), Standard Power (SP) and Very
+Low Power (VLP). 6 GHz STAs could be operated as either Regular or
+Subordinate clients. Define the flags for power type
+of AP and STATION mode.
+
+Signed-off-by: Wen Gong <quic_wgong@quicinc.com>
+Signed-off-by: Aditya Kumar Singh <quic_adisi@quicinc.com>
+---
+ include/linux/ieee80211.h | 38 ++++++++++++++++++++++++++++++++++++++
+ include/net/mac80211.h    |  2 ++
+ 2 files changed, 40 insertions(+)
+
+diff --git a/include/linux/ieee80211.h b/include/linux/ieee80211.h
+index b237e7f..84a29a9 100644
+--- a/include/linux/ieee80211.h
++++ b/include/linux/ieee80211.h
+@@ -1943,6 +1943,44 @@ int ieee80211_get_vht_max_nss(struct ieee80211_vht_cap *cap,
+ 			      int mcs, bool ext_nss_bw_capable,
+ 			      unsigned int max_vht_nss);
+ 
++/**
++ * enum ieee80211_ap_reg_power - regulatory power for a Access Point
++ *
++ * @IEEE80211_REG_UNSET_AP: Access Point has no regulatory power mode
++ * @IEEE80211_REG_LPI: Indoor Access Point
++ * @IEEE80211_REG_SP: Standard power Access Point
++ * @IEEE80211_REG_VLP: Very low power Access Point
++ * @IEEE80211_REG_AP_POWER_AFTER_LAST: internal
++ * @IEEE80211_REG_AP_POWER_MAX: maximum value
++ */
++enum ieee80211_ap_reg_power {
++	IEEE80211_REG_UNSET_AP,
++	IEEE80211_REG_LPI_AP,
++	IEEE80211_REG_SP_AP,
++	IEEE80211_REG_VLP_AP,
++	IEEE80211_REG_AP_POWER_AFTER_LAST,
++	IEEE80211_REG_AP_POWER_MAX =
++		IEEE80211_REG_AP_POWER_AFTER_LAST - 1,
++};
++
++/**
++ * enum ieee80211_client_reg_power - regulatory power for a client
++ *
++ * @IEEE80211_REG_UNSET_CLIENT: Client has no regulatory power mode
++ * @IEEE80211_REG_DEFAULT_CLIENT: Default Client
++ * @IEEE80211_REG_SUBORDINATE_CLIENT: Subordinate Client
++ * @IEEE80211_REG_CLIENT_POWER_AFTER_LAST: internal
++ * @IEEE80211_REG_CLIENT_POWER_MAX: maximum value
++ */
++enum ieee80211_client_reg_power {
++	IEEE80211_REG_UNSET_CLIENT,
++	IEEE80211_REG_DEFAULT_CLIENT,
++	IEEE80211_REG_SUBORDINATE_CLIENT,
++	IEEE80211_REG_CLIENT_POWER_AFTER_LAST,
++	IEEE80211_REG_CLIENT_POWER_MAX =
++		IEEE80211_REG_CLIENT_POWER_AFTER_LAST - 1,
++};
++
+ /* 802.11ax HE MAC capabilities */
+ #define IEEE80211_HE_MAC_CAP0_HTC_HE				0x01
+ #define IEEE80211_HE_MAC_CAP0_TWT_REQ				0x02
+diff --git a/include/net/mac80211.h b/include/net/mac80211.h
+index ccdceae..169f16e 100644
+--- a/include/net/mac80211.h
++++ b/include/net/mac80211.h
+@@ -657,6 +657,7 @@ struct ieee80211_fils_discovery {
+  * @nss_ap_isolate: Used for notifying the NSS host about AP isolate feature
+  * @multiple_bssid: the multiple bssid settings of the AP.
+  * @beacon_tx_mode: Beacon Tx Mode setting.
++ * @power_type: power type of BSS for 6 GHz
+  */
+ struct ieee80211_bss_conf {
+ 	const u8 *bssid;
+@@ -730,6 +731,7 @@ struct ieee80211_bss_conf {
+ 	bool nss_ap_isolate;
+ 	struct ieee80211_multiple_bssid multiple_bssid;
+ 	enum nl80211_beacon_tx_mode beacon_tx_mode;
++	enum ieee80211_ap_reg_power power_type;
+ 
+ 	/* Mesh configuration for nss offload */
+ 	u8 nss_offld_ttl;
+-- 
+2.7.4
+

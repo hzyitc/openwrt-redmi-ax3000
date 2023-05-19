@@ -1,0 +1,206 @@
+From 0bc9b8e34b6b942233362565f08693db91457368 Mon Sep 17 00:00:00 2001
+From: Wen Gong <quic_wgong@quicinc.com>
+Date: Wed, 20 Oct 2021 13:42:44 +0530
+Subject: [PATCH] ath11k: build 6G regd based on vdev type and 6G power type
+
+The building of regulatory domain in WMI_REG_CHAN_LIST_CC_EXT_EVENTID
+event expects the 6G power type for 6G reg rules. During bootup,
+the power mode is not defined. Hence by default, the host selects
+IEEE80211_REG_UNSET_AP as mode and builds regd accordingly.
+
+Signed-off-by: Wen Gong <quic_wgong@quicinc.com>
+Signed-off-by: Aditya Kumar Singh <quic_adisi@quicinc.com>
+---
+ drivers/net/wireless/ath/ath11k/mac.c | 11 ++++
+ drivers/net/wireless/ath/ath11k/mac.h |  2 +-
+ drivers/net/wireless/ath/ath11k/wmi.c | 94 ++++++++++++++++++++---------------
+ drivers/net/wireless/ath/ath11k/wmi.h |  1 +
+ 4 files changed, 67 insertions(+), 41 deletions(-)
+
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -536,6 +536,17 @@ struct ath11k *ath11k_mac_get_ar_by_vdev
+ 	return NULL;
+ }
+ 
++enum wmi_vdev_type ath11k_mac_get_ar_vdev_type(struct ath11k *ar)
++{
++	struct ath11k_vif *arvif;
++
++	list_for_each_entry(arvif, &ar->arvifs, list) {
++		return arvif->vdev_type;
++	}
++
++	return WMI_VDEV_TYPE_UNSPEC;
++}
++
+ struct ath11k *ath11k_mac_get_ar_by_pdev_id(struct ath11k_base *ab, u32 pdev_id)
+ {
+ 	int i;
+--- a/drivers/net/wireless/ath/ath11k/mac.h
++++ b/drivers/net/wireless/ath/ath11k/mac.h
+@@ -157,7 +157,7 @@ int ath11k_mac_coex_config(struct ath11k
+ 			   int coex, u32 wlan_prio_mask, u8 wlan_weight);
+ struct ath11k *ath11k_mac_get_ar_by_vdev_id(struct ath11k_base *ab, u32 vdev_id);
+ struct ath11k *ath11k_mac_get_ar_by_pdev_id(struct ath11k_base *ab, u32 pdev_id);
+-
++enum wmi_vdev_type ath11k_mac_get_ar_vdev_type(struct ath11k *ar);
+ void ath11k_mac_drain_tx(struct ath11k *ar);
+ void ath11k_mac_peer_cleanup_all(struct ath11k *ar);
+ int ath11k_mac_tx_mgmt_pending_free(int buf_id, void *skb, void *ctx);
+--- a/drivers/net/wireless/ath/ath11k/wmi.c
++++ b/drivers/net/wireless/ath/ath11k/wmi.c
+@@ -7392,29 +7392,15 @@ static bool ath11k_reg_is_world_alpha(ch
+ 	return alpha[0] == '0' && alpha[1] == '0';
+ }
+ 
+-static int ath11k_reg_chan_list_event(struct ath11k_base *ab, struct sk_buff *skb, enum wmi_reg_chan_list_cmd_type id)
++static int ath11k_reg_handle_chan_list(struct ath11k_base *ab,
++				       struct cur_regulatory_info *reg_info,
++				       enum ieee80211_ap_reg_power power_type)
+ {
+-	struct cur_regulatory_info *reg_info = NULL;
+-	struct ieee80211_regdomain *regd = NULL;
++	struct ieee80211_regdomain *regd;
+ 	bool intersect = false;
+-	int ret = 0, pdev_idx, i, j;
++	int pdev_idx;
+ 	struct ath11k *ar;
+-
+-	reg_info = kzalloc(sizeof(*reg_info), GFP_ATOMIC);
+-	if (!reg_info) {
+-		ret = -ENOMEM;
+-		goto fallback;
+-	}
+-
+-	if (id == WMI_REG_CHAN_LIST_CC_ID)
+-		ret = ath11k_pull_reg_chan_list_update_ev(ab, skb, reg_info);
+-	else
+-		ret = ath11k_pull_reg_chan_list_ext_update_ev(ab, skb, reg_info);
+-
+-	if (ret) {
+-		ath11k_warn(ab, "failed to extract regulatory info from received event\n");
+-		goto fallback;
+-	}
++	enum wmi_vdev_type vdev_type;
+ 
+ 	if (reg_info->status_code != REG_SET_CC_STATUS_PASS) {
+ 		/* In case of failure to set the requested ctry,
+@@ -7422,7 +7408,7 @@ static int ath11k_reg_chan_list_event(st
+ 		 * and return from here.
+ 		 */
+ 		ath11k_warn(ab, "Failed to set the requested Country regulatory setting\n");
+-		goto mem_free;
++		return -EINVAL;
+ 	}
+ 
+ 	pdev_idx = reg_info->phy_id;
+@@ -7433,8 +7419,8 @@ static int ath11k_reg_chan_list_event(st
+ 		 * event. Otherwise, it goes to fallback.
+ 		 */
+ 		if (ab->hw_params.single_pdev_only &&
+-		    pdev_idx < ab->hw_params.num_rxmda_per_pdev)
+-			goto mem_free;
++			pdev_idx < ab->hw_params.num_rxmda_per_pdev)
++			goto retfail;
+ 		else
+ 			goto fallback;
+ 	}
+@@ -7445,7 +7431,7 @@ static int ath11k_reg_chan_list_event(st
+ 	if (ab->default_regd[pdev_idx] && !ab->new_regd[pdev_idx] &&
+ 	    !memcmp((char *)ab->default_regd[pdev_idx]->alpha2,
+ 		    (char *)reg_info->alpha2, 2))
+-		goto mem_free;
++		goto retfail;
+ 
+ 	/* Intersect new rules with default regd if a new country setting was
+ 	 * requested, i.e a default regd was already set during initialization
+@@ -7457,8 +7443,14 @@ static int ath11k_reg_chan_list_event(st
+ 	    !ath11k_reg_is_world_alpha((char *)reg_info->alpha2))
+ 		intersect = true;
+ 
+-	regd = ath11k_reg_build_regd(ab, reg_info, intersect,
+-				     WMI_VDEV_TYPE_AP, IEEE80211_REG_UNSET_AP);
++	ar = ab->pdevs[pdev_idx].ar;
++	vdev_type = ath11k_mac_get_ar_vdev_type(ar);
++
++	ath11k_dbg(ab, ATH11K_DBG_WMI,
++		   "wmi handle chan list power type %d vdev type %d intersect %d\n",
++		   power_type, vdev_type, intersect);
++
++	regd = ath11k_reg_build_regd(ab, reg_info, intersect, vdev_type, power_type);
+ 	if (!regd) {
+ 		ath11k_warn(ab, "failed to build regd from reg_info\n");
+ 		goto fallback;
+@@ -7490,7 +7482,7 @@ static int ath11k_reg_chan_list_event(st
+ 	ab->dfs_region = reg_info->dfs_region;
+ 	spin_unlock(&ab->base_lock);
+ 
+-	goto mem_free;
++	return 0;
+ 
+ fallback:
+ 	/* Fallback to older reg (by sending previous country setting
+@@ -7502,17 +7494,48 @@ fallback:
+ 	 */
+ 	/* TODO: This is rare, but still should also be handled */
+ 	WARN_ON(1);
++retfail:
++	return -EINVAL;
++}
++
++
++static int ath11k_reg_chan_list_event(struct ath11k_base *ab, struct sk_buff *skb,
++				      enum wmi_reg_chan_list_cmd_type id)
++{
++	struct cur_regulatory_info *reg_info;
++	int ret, i, j;
++
++	reg_info = kzalloc(sizeof(*reg_info), GFP_ATOMIC);
++	if (!reg_info)
++		return -ENOMEM;
++
++	if (id == WMI_REG_CHAN_LIST_CC_ID)
++		ret = ath11k_pull_reg_chan_list_update_ev(ab, skb, reg_info);
++	else
++		ret = ath11k_pull_reg_chan_list_ext_update_ev(ab, skb, reg_info);
++
++	if (ret) {
++		ath11k_warn(ab, "failed to extract regulatory info from received event\n");
++		goto mem_free;
++	}
++
++	ret = ath11k_reg_handle_chan_list(ab, reg_info, IEEE80211_REG_UNSET_AP);
++	if (ret) {
++		ath11k_warn(ab, "failed to process regulatory info from received event\n");
++		goto mem_free;
++	}
++
+ mem_free:
+ 	if (reg_info) {
+ 		kfree(reg_info->reg_rules_2g_ptr);
+ 		kfree(reg_info->reg_rules_5g_ptr);
+ 		if (reg_info->is_ext_reg_event) {
+-			for (i = 0; i < WMI_REG_CURRENT_MAX_AP_TYPE; i++)
++			for (i = 0; i < WMI_REG_CURRENT_MAX_AP_TYPE; i++) {
+ 				kfree(reg_info->reg_rules_6g_ap_ptr[i]);
+ 
+-			for (j = 0; j < WMI_REG_CURRENT_MAX_AP_TYPE; j++)
+-				for (i = 0; i < WMI_REG_MAX_CLIENT_TYPE; i++)
+-					kfree(reg_info->reg_rules_6g_client_ptr[j][i]);
++				for (j = 0; j < WMI_REG_MAX_CLIENT_TYPE; j++)
++					kfree(reg_info->reg_rules_6g_client_ptr[i][j]);
++			}
+ 		}
+ 		kfree(reg_info);
+ 	}
+--- a/drivers/net/wireless/ath/ath11k/wmi.h
++++ b/drivers/net/wireless/ath/ath11k/wmi.h
+@@ -5136,6 +5136,7 @@ struct ath11k_targ_cap {
+ };
+ 
+ enum wmi_vdev_type {
++	WMI_VDEV_TYPE_UNSPEC =  0,
+ 	WMI_VDEV_TYPE_AP      = 1,
+ 	WMI_VDEV_TYPE_STA     = 2,
+ 	WMI_VDEV_TYPE_IBSS    = 3,

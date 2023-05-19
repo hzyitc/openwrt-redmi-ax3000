@@ -1,0 +1,38 @@
+From 2a9bbc5d449f38e6cdf91bdca9a5c576b6d27a1b Mon Sep 17 00:00:00 2001
+From: hzy <hzyitc@outlook.com>
+Date: Fri, 17 Mar 2023 20:33:35 +0000
+Subject: [PATCH 2/2] Fix runtime issues
+
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/net/wireless/ath/ath11k/core.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/wireless/ath/ath11k/core.c b/drivers/net/wireless/ath/ath11k/core.c
+index 9b58494..0c9a5d7 100644
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -1254,7 +1254,7 @@ int ath11k_core_ssr_notifier_cb(struct notifier_block *nb, unsigned long event,
+ 	phandle rproc_phandle;
+ 	struct device_node *rproc_node = NULL;
+ 	struct platform_device *pdev = NULL;
+-	struct platform_device *ssr_pdev = (struct platform_device *)data;
++	const char *ssr_name = (const char *) data;
+ #endif
+ 
+ 	if (test_bit(ATH11K_FLAG_FW_RESTART_FOR_HOST, &qmi->ab->dev_flags)) {
+@@ -1287,9 +1287,9 @@ int ath11k_core_ssr_notifier_cb(struct notifier_block *nb, unsigned long event,
+ 			ath11k_warn(ab, "Failed to get pdev from device node\n");
+ 			return 0;
+ 		}
+-		if (strcmp(ssr_pdev->name, pdev->name) != 0) {
++		if (strcmp(ssr_name, pdev->name) != 0) {
+ 			ath11k_warn(ab, "SSR notification mismatch %s  pdev name:%s\n",
+-				    (char *)data, pdev->name);
++				    ssr_name, pdev->name);
+ 			return 0;
+ 		}
+ #endif
+-- 
+2.25.1
+

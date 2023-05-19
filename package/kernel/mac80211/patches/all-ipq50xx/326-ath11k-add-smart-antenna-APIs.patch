@@ -1,0 +1,1856 @@
+From 1409ed7939f67dd8ed19f4b36e51a2f3320d25b1 Mon Sep 17 00:00:00 2001
+From: Maharaja Kennadyrajan <mkenna@codeaurora.org>
+Date: Mon, 28 Jun 2021 11:03:18 +0530
+Subject: [PATCH] Add smart APIs
+
+Signed-off-by: Maharaja Kennadyrajan <mkenna@codeaurora.org>
+---
+ drivers/net/wireless/ath/ath11k/Kconfig         |   7 +
+ drivers/net/wireless/ath/ath11k/Makefile        |   1 +
+ drivers/net/wireless/ath/ath11k/core.c          |   6 +
+ drivers/net/wireless/ath/ath11k/core.h          |  22 +
+ drivers/net/wireless/ath/ath11k/debug.h         |   1 +
+ drivers/net/wireless/ath/ath11k/hw.c            |   1 +
+ drivers/net/wireless/ath/ath11k/hw.h            |  14 +
+ drivers/net/wireless/ath/ath11k/mac.c           |  27 +-
+ drivers/net/wireless/ath/ath11k/mac.h           |   1 +
+ drivers/net/wireless/ath/ath11k/smart_ant.h     |  81 +++
+ drivers/net/wireless/ath/ath11k/smart_ant_alg.c | 432 ++++++++++++++++
+ drivers/net/wireless/ath/ath11k/smart_ant_alg.h | 268 ++++++++++
+ drivers/net/wireless/ath/ath11k/wmi.c           | 628 ++++++++++++++++++++++++
+ drivers/net/wireless/ath/ath11k/wmi.h           | 148 ++++++
+ 14 files changed, 1635 insertions(+), 2 deletions(-)
+ create mode 100644 drivers/net/wireless/ath/ath11k/smart_ant.h
+ create mode 100644 drivers/net/wireless/ath/ath11k/smart_ant_alg.c
+ create mode 100644 drivers/net/wireless/ath/ath11k/smart_ant_alg.h
+
+--- a/drivers/net/wireless/ath/ath11k/Kconfig
++++ b/drivers/net/wireless/ath/ath11k/Kconfig
+@@ -94,3 +94,10 @@ config ATH11K_CFR
+ 	  Enable ath11k cfr dump support
+ 
+ 	  Say Y to enable access to collect cfr data dump via debugfs.
++
++config ATH11K_SMART_ANT_ALG
++	bool "Smart antenna algorithm support"
++	depends on ATH11K
++	default y
++	---help---
++	This option enables smart antenna algorithm.
+--- a/drivers/net/wireless/ath/ath11k/Makefile
++++ b/drivers/net/wireless/ath/ath11k/Makefile
+@@ -29,6 +29,7 @@ ath11k-$(CPTCFG_ATH11K_SPECTRAL) += spec
+ ath11k-$(CPTCFG_ATH11K_PKTLOG) += pktlog.o
+ ath11k-$(CPTCFG_ATH11K_NSS_SUPPORT) += nss.o
+ ath11k-$(CPTCFG_ATH11K_CFR) += cfr.o
++ath11k-$(CPTCFG_ATH11K_SMART_ANT_ALG) += smart_ant_api.o
+ 
+ obj-$(CPTCFG_ATH11K_AHB) += ath11k_ahb.o
+ ath11k_ahb-y += ahb.o
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -58,6 +58,12 @@ module_param(ath11k_caldata_bin_path, ch
+ MODULE_PARM_DESC(ath11k_caldata_bin_path,
+ 		"Caldata bin path for loading");
+ 
++bool ath11k_enable_smart_antenna = false;
++module_param_named(enable_smart_antenna, ath11k_enable_smart_antenna, uint,
++		   0644);
++MODULE_PARM_DESC(enable_smart_antenna, "Enable smart antenna supprot in fw");
++EXPORT_SYMBOL(ath11k_enable_smart_antenna);
++
+ wait_queue_head_t ath11k_radio_prb_wq;
+ EXPORT_SYMBOL(ath11k_radio_prb_wq);
+ 
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -28,6 +28,7 @@
+ #include "rx_desc.h"
+ #include "nss.h"
+ #include "cfr.h"
++#include "smart_ant.h"
+ 
+ extern unsigned int ath11k_skip_radio;
+ extern wait_queue_head_t ath11k_radio_prb_wq;
+@@ -476,6 +477,7 @@ struct ath11k_sta {
+ 	u8 rssi_comb;
+ 	struct ath11k_htt_tx_stats *tx_stats;
+ 	struct ath11k_rx_peer_stats *rx_stats;
++	struct ath11k_smart_ant_sta *smart_ant_sta;
+ 
+ #ifdef CPTCFG_MAC80211_DEBUGFS
+ 	/* protected by conf_mutex */
+@@ -795,6 +797,9 @@ struct ath11k {
+ 	u8 cfr_enabled;
+ 	bool ani_enabled;
+ 	enum wmi_phy_mode cfr_phymode;
++
++	struct ath11k_smart_ant_info smart_ant_info;
++	u32 rx_antenna;
+ };
+ 
+ struct ath11k_band_cap {
+@@ -1244,6 +1249,24 @@ enum ath11k_fw_recovery_option {
+ 	ATH11K_FW_RECOVERY_ENABLE_SSR_ONLY,
+ };
+ 
++extern bool ath11k_enable_smart_antenna;
++
++static inline bool ath11k_smart_ant_enabled(struct ath11k *ar)
++{
++	if (!test_bit(WMI_TLV_SERVICE_SMART_ANTENNA_SW_SUPPORT,
++	    ar->ab->wmi_ab.svc_map))
++		return false;
++
++	if (!test_bit(WMI_TLV_SERVICE_SMART_ANTENNA_HW_SUPPORT,
++	    ar->ab->wmi_ab.svc_map))
++		return false;
++
++	if (!ath11k_enable_smart_antenna)
++		return false;
++
++	return true;
++}
++
+ extern const struct ce_pipe_config ath11k_target_ce_config_wlan_ipq8074[];
+ extern const struct service_to_pipe ath11k_target_service_to_ce_map_wlan_ipq8074[];
+ extern const struct service_to_pipe ath11k_target_service_to_ce_map_wlan_ipq6018[];
+--- a/drivers/net/wireless/ath/ath11k/debug.h
++++ b/drivers/net/wireless/ath/ath11k/debug.h
+@@ -29,6 +29,7 @@ enum ath11k_debug_mask {
+ 	ATH11K_DBG_CFR		= 0x00008000,
+ 	ATH11K_DBG_CFR_DUMP	= 0x00010000,
+ 	ATH11K_DBG_PEER		= 0x00020000,
++	ATH11K_DBG_SMART_ANT	= 0x00040000,
+ 	ATH11K_DBG_ANY		= 0xffffffff,
+ };
+ 
+--- a/drivers/net/wireless/ath/ath11k/hw.c
++++ b/drivers/net/wireless/ath/ath11k/hw.c
+@@ -156,6 +156,7 @@ static void ath11k_init_wmi_config_ipq80
+ 	config->ema_max_vap_cnt = ab->num_radios;
+ 	config->ema_max_profile_period = TARGET_EMA_MAX_PROFILE_PERIOD;
+ 	config->beacon_tx_offload_max_vdev += config->ema_max_vap_cnt;
++	config->smart_ant_cap = 1;
+ 
+ }
+ 
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -314,7 +314,7 @@ int ath11k_mac_hw_ratecode_to_legacy_rat
+ 	return -EINVAL;
+ }
+ 
+-static int get_num_chains(u32 mask)
++int get_num_chains(u32 mask)
+ {
+ 	int num_chains = 0;
+ 
+@@ -5158,6 +5158,13 @@ static int ath11k_mac_op_sta_state(struc
+ 		if (ret)
+ 			ath11k_warn(ar->ab, "Failed to associate station: %pM\n",
+ 				    sta->addr);
++
++		if (vif->type == NL80211_IFTYPE_AP &&
++		    ath11k_smart_ant_enabled(ar)) {
++			if (ath11k_smart_ant_sta_connect(ar, arvif, sta))
++				ath11k_warn(ar->ab, "Smart antenna station connect failed, disabling smart antenna for %pM\n",
++					    sta->addr);
++		}
+ 	} else if (old_state == IEEE80211_STA_ASSOC &&
+ 		   new_state == IEEE80211_STA_AUTHORIZED) {
+ 		spin_lock_bh(&ar->ab->base_lock);
+@@ -5197,6 +5204,8 @@ static int ath11k_mac_op_sta_state(struc
+ 		   (vif->type == NL80211_IFTYPE_AP ||
+ 		    vif->type == NL80211_IFTYPE_MESH_POINT ||
+ 		    vif->type == NL80211_IFTYPE_ADHOC)) {
++		ath11k_smart_ant_sta_disconnect(ar, sta);
++
+ 		ret = ath11k_station_disassoc(ar, vif, sta);
+ 		if (ret)
+ 			ath11k_warn(ar->ab, "Failed to disassociate station: %pM\n",
+@@ -7598,6 +7607,8 @@ ath11k_mac_update_vif_chan(struct ath11k
+ 	 * should be available for the channel switch now.
+ 	 */
+ 
++	ath11k_smart_ant_disable(arvif);
++
+ 	/* TODO: Update ar->rx_channel */
+ 
+ 	for (i = 0; i < n_vifs; i++) {
+@@ -7813,6 +7824,21 @@ ath11k_mac_op_assign_vif_chanctx(struct
+ 		goto out;
+ 	}
+ 
++	ret = ath11k_smart_ant_enable(arvif);
++	if (ret) {
++		ath11k_warn(ab, "failed to enable smart antenna algorithm %d\n",
++			    ret);
++		goto out;
++	}
++
++	ret = ath11k_smart_ant_set_default(arvif);
++	if (ret) {
++		ath11k_warn(ab, "failed to set default smart antenna configuration %d\n",
++			    ret);
++		ath11k_smart_ant_disable(arvif);
++		goto out;
++	}
++
+ 	if (arvif->vdev_type != WMI_VDEV_TYPE_MONITOR && ar->monitor_vdev_created)
+ 		ath11k_mac_monitor_start(ar);
+ 
+--- a/drivers/net/wireless/ath/ath11k/mac.h
++++ b/drivers/net/wireless/ath/ath11k/mac.h
+@@ -142,6 +142,7 @@ int ath11k_mac_register(struct ath11k_ba
+ int ath11k_mac_allocate(struct ath11k_base *ab);
+ int ath11k_mac_hw_ratecode_to_legacy_rate(u8 hw_rc, u8 preamble, u8 *rateidx,
+ 					  u16 *rate);
++int get_num_chains(u32 mask);
+ u8 ath11k_mac_bitrate_to_idx(const struct ieee80211_supported_band *sband,
+ 			     u32 bitrate);
+ u8 ath11k_mac_hw_rate_to_idx(const struct ieee80211_supported_band *sband,
+--- /dev/null
++++ b/drivers/net/wireless/ath/ath11k/smart_ant.h
+@@ -0,0 +1,88 @@
++/* SPDX-License-Identifier: BSD-3-Clause-Clear */
++/*
++ * Copyright (c) 2015, 2021 The Linux Foundation. All rights reserved.
++ *
++ * Permission to use, copy, modify, and/or distribute this software for
++ * any purpose with or without fee is hereby granted, provided that the
++ * above copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT
++ * OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++#ifndef _SMART_ANT_H_
++#define _SMART_ANT_H_
++
++#include "smart_ant_api.h"
++
++/* In AP mode, this API notifies of disassociation of a station.
++ * Station specific information related to smart antenna should
++ * be reset in this API.
++ */
++static inline void
++ath11k_smart_ant_sta_disconnect(struct ath11k *ar, struct ieee80211_sta *sta)
++{
++	ath11k_smart_ant_alg_sta_disconnect(ar, sta);
++}
++
++/* In AP mode, this API is to notify of association of a station. Station
++ * specific information used for smart antenna may be initialized in this
++ * API. Peer specific smart antenna configuration in fw may need to be
++ * don from this API using ath11k_wmi_peer_cfg_smart_ant().
++ */
++static inline int
++ath11k_smart_ant_sta_connect(struct ath11k *ar, struct ath11k_vif *arvif,
++			     struct ieee80211_sta *sta)
++{
++	return ath11k_smart_ant_alg_sta_connect(ar, arvif, sta);
++}
++
++/* This API is to set initial tx/rx antennas */
++static inline int
++ath11k_smart_ant_set_default(struct ath11k_vif *arvif)
++{
++	return ath11k_smart_ant_alg_set_default(arvif);
++}
++
++/* This API reverts the configurations done in ath11k_smart_ant_enable().
++ * ath11k_wmi_pdev_disable_smart_ant needs to be called to disable
++ * smart antenna logic in fw.
++ */
++static inline void
++ath11k_smart_ant_disable(struct ath11k_vif *arvif)
++{
++	ath11k_smart_ant_alg_disable(arvif);
++}
++
++/* This smart antenna API configures fw with initial smart antenna params
++ * such as mode of antenna control and tx/rx antennas.
++ * This API calls ath11k_wmi_pdev_enable_smart_ant() to configure initial
++ * parameters for fw to start smart antenna. This API may also need to
++ * enable tx feedback through packetlog.
++ */
++static inline int
++ath11k_smart_ant_enable(struct ath11k_vif *arvif)
++{
++	return ath11k_smart_ant_alg_enable(arvif);
++}
++
++/* This API is to process tx feedback information such as tx rate
++ * PER, rssi and antennas used for tx. Based on feedback stats a
++ * a better antenna combination can be chosen for tx.
++ * Better tx antenna can be configured using ath11k_wmi_peer_set_smart_tx_ant().
++ * When needed this API can also request for feedback on packets with particular
++ * antenna at a particular rate.
++ */
++static inline void
++ath11k_smart_ant_proc_tx_feedback(struct ath11k_base *ab, u32 *data,
++				  u16 peer_id)
++{
++	ath11k_smart_ant_alg_proc_tx_feedback(ab, data, peer_id);
++}
++
++#endif
+--- a/drivers/net/wireless/ath/ath11k/wmi.c
++++ b/drivers/net/wireless/ath/ath11k/wmi.c
+@@ -145,6 +145,8 @@ static const struct wmi_tlv_policy wmi_t
+ 		= { .min_len = sizeof(struct wmi_obss_color_collision_event) },
+ 	[WMI_TAG_WDS_ADDR_EVENT]
+ 		= { .min_len = sizeof(struct wmi_wds_addr_event) },
++	[WMI_TAG_PEER_RATECODE_LIST_EVENT]
++		= { .min_len = sizeof(struct wmi_peer_ratecode_list_fixed_param) },
+ };
+ 
+ #define PRIMAP(_hw_mode_) \
+@@ -4378,6 +4380,7 @@ ath11k_wmi_copy_resource_config(struct w
+ 	wmi_cfg->host_service_flags &= ~(1 << WMI_RSRC_CFG_HOST_SERVICE_FLAG_REG_CC_EXT_SUPPORT_BIT);
+ 	wmi_cfg->host_service_flags |= tg_cfg->is_reg_cc_ext_event_supported <<
+ 				       WMI_RSRC_CFG_HOST_SERVICE_FLAG_REG_CC_EXT_SUPPORT_BIT;
++	wmi_cfg->smart_ant_cap = 1;
+ }
+ 
+ static int ath11k_init_cmd_send(struct ath11k_pdev_wmi *wmi,
+@@ -9779,6 +9782,165 @@ static void ath11k_wmi_parse_cfr_capture
+ 			   "failed to process cfr cpature ret = %d\n", ret);
+ }
+ 
++static int ath11k_wmi_peer_ratecode_subtlv_parser(struct ath11k_base *ab,
++						  u16 tag, u16 len,
++						  const void *ptr, void *data)
++{
++	struct wmi_peer_cck_ofdm_rate_info *ofdm_rate;
++	struct wmi_peer_mcs_rate_info *mcs_rate;
++	struct ath11k_peer_rate_code_list_cap *rate_cap = data;
++	int ret = 0;
++	static int i = 0, j = 0;
++
++	switch (tag) {
++	case WMI_TAG_PEER_CCK_OFDM_RATE_INFO:
++		ofdm_rate = (struct wmi_peer_cck_ofdm_rate_info *)ptr;
++		if (i == ATH11K_SMART_ANT_LEGACY_RATE_WORDS)
++			i = 0;
++		rate_cap->rtcode_legacy[i] = ofdm_rate->ratecode_legacy;
++		i++;
++		break;
++	case WMI_TAG_PEER_MCS_RATE_INFO:
++		mcs_rate = (struct wmi_peer_mcs_rate_info *)ptr;
++		if (j == ATH11K_SMART_ANT_MAX_HT_RATE_WORDS)
++			j = 0;
++		rate_cap->rtcode_20[j] = mcs_rate->rt_code_20;
++		rate_cap->rtcode_40[j] = mcs_rate->rt_code_40;
++		rate_cap->rtcode_80[j] = mcs_rate->rt_code_80;
++		j++;
++		break;
++	default:
++		ath11k_warn(ab,
++			    "Received invalid tag for wmi peer ratecode in subtlvs\n");
++		return -EINVAL;
++		break;
++	}
++
++	return ret;
++}
++
++static int ath11k_wmi_peer_ratecode_event_parser(struct ath11k_base *ab,
++						 u16 tag, u16 len,
++						 const void *ptr, void *data)
++{
++	int ret = 0;
++
++	ath11k_dbg(ab, ATH11K_DBG_WMI, "wmi peer ratecode event tag 0x%x of len %d rcvd\n",
++		   tag, len);
++
++	switch (tag) {
++	case WMI_TAG_PEER_RATECODE_LIST_EVENT:
++		/* Fixed param is already processed*/
++		break;
++	case WMI_TAG_ARRAY_STRUCT:
++		 /* len 0 is expected for array of struct when there
++		  * is no content of that type to pack inside that tlv
++		  */
++		if (len == 0)
++			return 0;
++		ret = ath11k_wmi_tlv_iter(ab, ptr, len,
++					  ath11k_wmi_peer_ratecode_subtlv_parser,
++					  data);
++		break;
++	default:
++		ath11k_warn(ab, "Received invalid tag for wmi peer ratecode event\n");
++		ret = -EINVAL;
++		break;
++	}
++
++	return ret;
++}
++
++static void ath11k_wmi_event_peer_ratecode_list(struct ath11k_base *ab,
++						struct sk_buff *skb)
++{
++	const struct wmi_peer_ratecode_list_fixed_param *fixed_param;
++	const struct wmi_tlv *tlv;
++	struct ath11k_peer *peer = NULL;
++	struct ieee80211_sta *sta;
++	struct ath11k_sta *arsta;
++	u16 tlv_tag;
++	u8 *ptr;
++	int ret;
++
++	ptr = skb->data;
++	if (skb->len < (sizeof(*fixed_param) + TLV_HDR_SIZE)) {
++		ath11k_warn(ab, "peer ratecode list event size invalid\n");
++		return;
++	}
++
++	tlv = (struct wmi_tlv *)ptr;
++	tlv_tag = FIELD_GET(WMI_TLV_TAG, tlv->header);
++	ptr += sizeof(*tlv);
++
++	if (tlv_tag == WMI_TAG_PEER_RATECODE_LIST_EVENT) {
++		fixed_param = (struct wmi_peer_ratecode_list_fixed_param *)ptr;
++
++		ath11k_dbg(ab, ATH11K_DBG_WMI,
++			   "pdev peer ratecode list on pdev: %d of peer: %pM ratecount: %d\n",
++			   fixed_param->pdev_id, fixed_param->macaddr.addr, fixed_param->ratecount);
++	} else {
++		ath11k_warn(ab, "peer ratecode list event received with wrong tag\n");
++		return;
++	}
++
++	rcu_read_lock();
++	spin_lock_bh(&ab->base_lock);
++
++	peer = ath11k_peer_find_by_addr(ab, fixed_param->macaddr.addr);
++	if (!peer) {
++		ath11k_warn(ab, "peer not found %pM\n", fixed_param->macaddr.addr);
++		spin_unlock_bh(&ab->base_lock);
++		rcu_read_unlock();
++		return;
++	}
++
++ 	sta = peer->sta;
++
++ 	if (!sta) {
++ 		ath11k_warn(ab, "failed to find station entry %pM\n",
++ 			    fixed_param->macaddr.addr);
++		spin_unlock_bh(&ab->base_lock);
++		rcu_read_unlock();
++ 		return;
++ 	}
++
++ 	arsta = (struct ath11k_sta *)sta->drv_priv;
++
++	spin_unlock_bh(&ab->base_lock);
++	rcu_read_unlock();
++
++	if (!arsta)
++		return;
++
++	if (!arsta->smart_ant_sta) {
++		ath11k_dbg(ab, ATH11K_DBG_SMART_ANT,
++			   "arsta->smart_ant_sta is null for the peer: %pM\n",
++			   fixed_param->macaddr.addr);
++ 		return;
++ 	}
++
++	ret = ath11k_wmi_tlv_iter(ab, skb->data, skb->len,
++				  ath11k_wmi_peer_ratecode_event_parser,
++				  &arsta->smart_ant_sta->rate_cap);
++	if (ret) {
++		ath11k_warn(ab, "failed to parse cck ofdm_rate tlv %d\n", ret);
++		return;
++	}
++
++	ret = ath11k_wmi_tlv_iter(ab, skb->data, skb->len,
++				  ath11k_wmi_peer_ratecode_event_parser,
++				  &arsta->smart_ant_sta->rate_cap);
++	if (ret) {
++		ath11k_warn(ab, "failed to parse mcs_rate tlv %d\n", ret);
++		return;
++	}
++
++	ether_addr_copy(arsta->smart_ant_sta->mac_addr, fixed_param->macaddr.addr);
++
++	return;
++}
++
+ static void ath11k_wmi_tlv_op_rx(struct ath11k_base *ab, struct sk_buff *skb)
+ {
+ 	struct wmi_cmd_hdr *cmd_hdr;
+@@ -9943,6 +10105,9 @@ static void ath11k_wmi_tlv_op_rx(struct
+ 	case WMI_PDEV_ANI_OFDM_LEVEL_EVENTID:
+ 		ath11k_wmi_event_ani_ofdm_level(ab, skb);
+ 		break;
++	case WMI_PEER_RATECODE_LIST_EVENTID:
++		ath11k_wmi_event_peer_ratecode_list(ab, skb);
++		break;
+ 	/* TODO: Add remaining events */
+ 	default:
+ 		ath11k_dbg(ab, ATH11K_DBG_WMI, "Unknown eventid: 0x%x\n", id);
+@@ -10267,3 +10432,393 @@ int ath11k_wmi_wow_enable(struct ath11k
+ 
+ 	return ath11k_wmi_cmd_send(ar->wmi, skb, WMI_WOW_ENABLE_CMDID);
+ }
++
++void
++ath11k_wmi_sa_set_gpio_param(struct ath11k *ar,
++			     struct smart_ant_enable_params *params)
++{
++	params->gpio_pin[0] = ATH11K_SMART_ANT_PIN0;
++	params->gpio_func[0] = ATH11K_SMART_ANT_FUNC0;
++	params->gpio_pin[1] = ATH11K_SMART_ANT_PIN1;
++	params->gpio_func[1] = ATH11K_SMART_ANT_FUNC1;
++	params->gpio_pin[2] = 0;
++	params->gpio_func[2] = 0;
++	params->gpio_pin[3] = 0;
++	params->gpio_func[3] = 0;
++}
++
++int ath11k_wmi_pdev_set_rx_ant(struct ath11k *ar, u32 rx_antenna)
++{
++	struct ath11k_pdev_wmi *wmi = ar->wmi;
++	struct wmi_pdev_set_rx_antenna_cmd *cmd;
++	struct sk_buff *skb;
++	void *ptr;
++	int ret, len;
++
++	len = sizeof(*cmd);
++
++	skb = ath11k_wmi_alloc_skb(wmi->wmi_ab, len);
++	if (!skb)
++		return -ENOMEM;
++
++	ptr = skb->data;
++
++	cmd = ptr;
++	cmd->tlv_header = FIELD_PREP(WMI_TLV_TAG,
++				     WMI_TAG_PDEV_SMART_ANT_SET_RX_ANTENNA_CMD) |
++			  FIELD_PREP(WMI_TLV_LEN, sizeof(*cmd) - TLV_HDR_SIZE);
++	cmd->rx_antenna = rx_antenna;
++	cmd->pdev_id = ar->pdev->pdev_id;
++
++	ret = ath11k_wmi_cmd_send(wmi, skb, WMI_PDEV_SMART_ANT_SET_RX_ANTENNA_CMDID);
++	if (ret) {
++		ath11k_warn(ar->ab, "failed to submit WMI_PDEV_SMART_ANT_SET_RX_ANTENNA_CMDID\n");
++		dev_kfree_skb(skb);
++	}
++
++	ath11k_dbg(ar->ab, ATH11K_DBG_WMI, "WMI pdev rx set smart antenna pdev_id %d rx_antenna: %d\n",
++		   ar->pdev->pdev_id, rx_antenna);
++
++	return ret;
++}
++
++int ath11k_wmi_peer_set_smart_tx_ant(struct ath11k *ar,
++				     u32 vdev_id, const u8 *macaddr,
++				     const u32 *tx_antenna)
++{
++	struct ath11k_pdev_wmi *wmi = ar->wmi;
++	struct wmi_pdev_set_tx_antenna_cmd *cmd;
++	struct wmi_peer_set_smart_tx_ant_series_cmd *tx_ant_series;
++	struct wmi_tlv *tlv;
++	struct sk_buff *skb;
++	void *ptr;
++	int i, ret, len;
++
++	len = sizeof(*cmd) + WMI_TLV_HDR_SIZE;
++	len += WMI_SMART_MAX_RATE_SERIES *
++	       sizeof(struct wmi_peer_set_smart_tx_ant_series_cmd);
++
++	skb = ath11k_wmi_alloc_skb(wmi->wmi_ab, len);
++	if (!skb)
++		return -ENOMEM;
++
++	ptr = skb->data;
++
++	cmd = ptr;
++	cmd->tlv_header = FIELD_PREP(WMI_TLV_TAG,
++				     WMI_TAG_PEER_SMART_ANT_SET_TX_ANTENNA_CMD) |
++			  FIELD_PREP(WMI_TLV_LEN, sizeof(*cmd) - TLV_HDR_SIZE);
++	cmd->vdev_id = vdev_id;
++	ether_addr_copy(cmd->macaddr.addr, macaddr);
++
++	ptr = skb->data + sizeof(*cmd);
++
++	len = WMI_SMART_MAX_RATE_SERIES *
++	      sizeof(struct wmi_peer_set_smart_tx_ant_series_cmd);
++
++	tlv = ptr;
++	tlv->header = FIELD_PREP(WMI_TLV_TAG, WMI_TAG_ARRAY_STRUCT) |
++		      FIELD_PREP(WMI_TLV_LEN, len);
++	ptr += TLV_HDR_SIZE;
++
++	tx_ant_series = ptr;
++
++	for (i = 0; i < WMI_SMART_MAX_RATE_SERIES; i++) {
++		tx_ant_series->tlv_header =
++			FIELD_PREP(WMI_TLV_TAG,
++				   WMI_TAG_PEER_SMART_ANT_SET_TX_ANTENNA_SERIES) |
++			FIELD_PREP(WMI_TLV_LEN, len - TLV_HDR_SIZE);
++		tx_ant_series->ant_series = tx_antenna[i];
++		tx_ant_series++;
++	}
++
++	ret = ath11k_wmi_cmd_send(wmi, skb, WMI_PEER_SMART_ANT_SET_TX_ANTENNA_CMDID);
++	if (ret) {
++		ath11k_warn(ar->ab,
++			    "failed to send WMI_PEER_SMART_ANT_SET_TX_ANTENNA_CMDID\n");
++		dev_kfree_skb(skb);
++	}
++
++	ath11k_dbg(ar->ab, ATH11K_DBG_WMI, "WMI peer set tx smart antenna peer %pM\n",
++		   macaddr);
++
++	return ret;
++}
++
++int
++ath11k_wmi_pdev_disable_smart_ant(struct ath11k *ar,
++				  struct ath11k_smart_ant_info *info)
++{
++	struct ath11k_pdev_wmi *wmi = ar->wmi;
++	struct wmi_pdev_set_smart_ant_cmd *cmd;
++	struct wmi_pdev_smart_ant_gpio_handle_cmd *gpio_param;
++	struct wmi_tlv *tlv;
++	struct sk_buff *skb;
++	void *ptr;
++	int i, ret, len;
++
++	len = sizeof(*cmd) + TLV_HDR_SIZE +
++	      WMI_SMART_ANTENNA_HAL_MAX * sizeof(*gpio_param);
++
++	skb = ath11k_wmi_alloc_skb(wmi->wmi_ab, len);
++	if (!skb)
++		return -ENOMEM;
++
++	ptr = skb->data;
++
++	cmd = ptr;
++	cmd->tlv_header = FIELD_PREP(WMI_TLV_TAG,
++				     WMI_TAG_PDEV_SMART_ANT_ENABLE_CMD) |
++			  FIELD_PREP(WMI_TLV_LEN, sizeof(*cmd) - TLV_HDR_SIZE);
++	cmd->pdev_id = ar->pdev->pdev_id;
++	cmd->mode = 0;
++	cmd->enable = info->enabled;
++	cmd->rx_antenna = 0;
++	cmd->tx_default_antenna = 0;
++
++	ptr = skb->data + sizeof(*cmd);
++
++	len = WMI_SMART_ANTENNA_HAL_MAX * sizeof(*gpio_param);
++
++	tlv = ptr;
++	tlv->header = FIELD_PREP(WMI_TLV_TAG, WMI_TAG_ARRAY_STRUCT) |
++		      FIELD_PREP(WMI_TLV_LEN, len);
++	ptr += TLV_HDR_SIZE;
++	gpio_param = ptr;
++
++	for (i = 0; i < WMI_SMART_ANTENNA_HAL_MAX; i++) {
++		gpio_param->tlv_header = FIELD_PREP(WMI_TLV_TAG,
++						    WMI_TAG_PDEV_SMART_ANT_GPIO_HANDLE) |
++					 FIELD_PREP(WMI_TLV_LEN, len - TLV_HDR_SIZE);
++
++		/* Set back the gpio pin and func values to 0 for ath11k chipsets. */
++
++		gpio_param->gpio_pin = 0;
++		gpio_param->gpio_func = 0;
++		gpio_param->pdev_id = ar->pdev->pdev_id;
++		gpio_param++;
++	}
++
++	ret = ath11k_wmi_cmd_send(wmi, skb, WMI_PDEV_SMART_ANT_ENABLE_CMDID);
++	if (ret) {
++		ath11k_warn(ar->ab,
++			    "failed to send WMI_PDEV_SMART_ANT_ENABLE_CMDID\n");
++		dev_kfree_skb(skb);
++	}
++
++	return ret;
++}
++
++int
++ath11k_wmi_peer_set_smart_ant_node_config(struct ath11k *ar,
++					  u8 mac_addr[ETH_ALEN],
++					  struct ath11k_smart_ant_node_config_params *param)
++{
++	struct ath11k_pdev_wmi *wmi = ar->wmi;
++	struct wmi_peer_set_smart_ant_node_config_ops_cmd *cmd;
++	struct wmi_tlv *tlv;
++	struct sk_buff *skb;
++	void *ptr;
++	int ret, len, args_tlv_len;
++	u32 *node_config_args;
++
++	args_tlv_len = TLV_HDR_SIZE + param->arg_count * sizeof(u32);
++	len = sizeof(*cmd) + args_tlv_len;
++
++	if (param->arg_count == 0) {
++		ath11k_warn(ar->ab, "Argument count is 0\n");
++		return -EINVAL;
++	}
++
++	skb = ath11k_wmi_alloc_skb(wmi->wmi_ab, len);
++	if (!skb)
++		return -ENOMEM;
++
++	cmd = (struct wmi_peer_set_smart_ant_node_config_ops_cmd *)skb->data;
++	cmd->tlv_header = FIELD_PREP(WMI_TLV_TAG,
++				     WMI_TAG_PEER_SMART_ANT_SET_NODE_CONFIG_OPS_CMD) |
++			  FIELD_PREP(WMI_TLV_LEN, sizeof(*cmd) - TLV_HDR_SIZE);
++	cmd->vdev_id = param->vdev_id;
++	cmd->args_count = param->arg_count;
++	cmd->cmd_id = param->cmd_id;
++	ether_addr_copy(cmd->mac_addr.addr, mac_addr);
++
++	ptr = skb->data + sizeof(struct wmi_peer_set_smart_ant_node_config_ops_cmd);
++
++	tlv = ptr;
++	tlv->header = FIELD_PREP(WMI_TLV_TAG, WMI_TAG_ARRAY_UINT32) |
++		      FIELD_PREP(WMI_TLV_LEN,  param->arg_count * sizeof(u32));
++
++	ptr += TLV_HDR_SIZE;
++
++	node_config_args = (u32 *)ptr;
++
++	node_config_args = param->arg_arr;
++
++	ret = ath11k_wmi_cmd_send(wmi, skb,
++				  WMI_PEER_SMART_ANT_SET_NODE_CONFIG_OPS_CMDID);
++	if (ret) {
++		ath11k_warn(ar->ab, "failed to send WMI_PEER_SMART_ANT_SET_NODE_CONFIG_OPS CMD :%d\n",
++			    ret);
++		dev_kfree_skb(skb);
++	}
++
++	ath11k_dbg(ar->ab, ATH11K_DBG_WMI,
++		   "WMI peer smart ant set node config ops: vdev_id: %d n_args: %d\n",
++		   cmd->vdev_id, cmd->args_count);
++
++	return ret;
++}
++
++int
++ath11k_wmi_peer_set_smart_ant_train_info(struct ath11k *ar,
++					 u32 vdev_id,
++					 u8 mac_addr[ETH_ALEN],
++					 struct ath11k_smart_ant_train_info *param)
++{
++	struct ath11k_pdev_wmi *wmi = ar->wmi;
++	struct wmi_peer_set_smart_ant_train_ant_fixed_param_cmd *cmd;
++	struct wmi_peer_set_smart_ant_train_ant_param *train_param;
++	struct wmi_tlv *tlv;
++	struct sk_buff *skb;
++	void *ptr;
++	int i, ret, len, itr = 0;
++
++	len = sizeof(*cmd) + WMI_TLV_HDR_SIZE;
++	len += WMI_SMART_MAX_RATE_SERIES *
++	       sizeof(struct wmi_peer_set_smart_ant_train_ant_param);
++
++	skb = ath11k_wmi_alloc_skb(wmi->wmi_ab, len);
++	if (!skb)
++		return -ENOMEM;
++
++	ptr = skb->data;
++
++	cmd = ptr;
++	cmd->tlv_header = FIELD_PREP(WMI_TLV_TAG,
++				     WMI_TAG_PEER_SMART_ANT_SET_TRAIN_ANTENNA_CMD) |
++			  FIELD_PREP(WMI_TLV_LEN, sizeof(*cmd) - TLV_HDR_SIZE);
++	cmd->vdev_id = vdev_id;
++	ether_addr_copy(cmd->macaddr.addr, mac_addr);
++	cmd->numpkts = param->numpkts;
++
++	ptr = skb->data + sizeof(*cmd);
++
++	len = WMI_SMART_MAX_RATE_SERIES *
++	      sizeof(struct wmi_peer_set_smart_ant_train_ant_param);
++
++	tlv = ptr;
++	tlv->header = FIELD_PREP(WMI_TLV_TAG, WMI_TAG_ARRAY_STRUCT) |
++		      FIELD_PREP(WMI_TLV_LEN, len);
++	ptr += TLV_HDR_SIZE;
++
++	train_param = ptr;
++
++	for (i = 0; i < WMI_SMART_MAX_RATE_SERIES; i++) {
++		train_param->tlv_header =
++			FIELD_PREP(WMI_TLV_TAG,
++				   WMI_TAG_PEER_SMART_ANT_SET_TRAIN_ANTENNA_PARAM) |
++			FIELD_PREP(WMI_TLV_LEN, len - TLV_HDR_SIZE);
++		train_param->train_rate_series_lo =
++			((param->rate_array[itr] & ATH11K_SMART_ANT_MASK_RCODE) |
++			 (param->rate_array[itr] & (ATH11K_SMART_ANT_MASK_RCODE << 16)));
++		train_param->train_rate_series_hi =
++			((param->rate_array[itr + 1] & ATH11K_SMART_ANT_MASK_RCODE) |
++			 (param->rate_array[itr + 1] & (ATH11K_SMART_ANT_MASK_RCODE << 16)));
++		itr += 2;
++		train_param->train_antenna_series = param->antenna_array[i];
++		train_param->rc_flags = 0;
++		train_param++;
++	}
++
++	ret = ath11k_wmi_cmd_send(wmi, skb, WMI_PEER_SMART_ANT_SET_TRAIN_INFO_CMDID);
++	if (ret) {
++		ath11k_warn(ar->ab,
++			    "failed to send WMI_PEER_SMART_ANT_SET_TRAIN_INFO_CMDID\n");
++		dev_kfree_skb(skb);
++	}
++
++	return ret;
++}
++
++int
++ath11k_wmi_pdev_enable_smart_ant(struct ath11k *ar,
++				 struct ath11k_smart_ant_info *info)
++{
++	struct ath11k_pdev_wmi *wmi = ar->wmi;
++	struct wmi_pdev_set_smart_ant_cmd *cmd;
++	struct wmi_pdev_smart_ant_gpio_handle_cmd *gpio_param;
++	struct wmi_tlv *tlv;
++	struct smart_ant_enable_params *params = NULL;
++	struct sk_buff *skb;
++	void *ptr;
++	int i;
++	int ret, len;
++
++	len = sizeof(*cmd) + TLV_HDR_SIZE +
++	      WMI_SMART_ANTENNA_HAL_MAX * sizeof(*gpio_param);
++
++	skb = ath11k_wmi_alloc_skb(wmi->wmi_ab, len);
++	if (!skb)
++		return -ENOMEM;
++
++	params = kzalloc(sizeof(struct smart_ant_enable_params),
++			 GFP_ATOMIC);
++	if (!params)
++		return -ENOMEM;
++
++	ath11k_wmi_sa_set_gpio_param(ar, params);
++
++	ptr = skb->data;
++
++	cmd = ptr;
++	cmd->tlv_header = FIELD_PREP(WMI_TLV_TAG,
++				     WMI_TAG_PDEV_SMART_ANT_ENABLE_CMD) |
++			  FIELD_PREP(WMI_TLV_LEN, sizeof(*cmd) - TLV_HDR_SIZE);
++	cmd->pdev_id = ar->pdev->pdev_id;
++	cmd->mode = WMI_SMART_ANT_MODE_PARALLEL;
++	cmd->enable = info->enabled;
++	cmd->rx_antenna = info->default_ant;
++	cmd->tx_default_antenna = info->default_ant;
++
++	ptr = skb->data + sizeof(*cmd);
++
++	len = WMI_SMART_ANTENNA_HAL_MAX * sizeof(*gpio_param);
++
++	tlv = ptr;
++	tlv->header = FIELD_PREP(WMI_TLV_TAG, WMI_TAG_ARRAY_STRUCT) |
++		      FIELD_PREP(WMI_TLV_LEN, len);
++	ptr += TLV_HDR_SIZE;
++
++	gpio_param = ptr;
++
++	for (i = 0; i < WMI_SMART_ANTENNA_HAL_MAX; i++) {
++		gpio_param->tlv_header = FIELD_PREP(WMI_TLV_TAG,
++						    WMI_TAG_PDEV_SMART_ANT_GPIO_HANDLE) |
++					 FIELD_PREP(WMI_TLV_LEN, len - TLV_HDR_SIZE);
++		if (info->mode == WMI_SMART_ANT_MODE_SERIAL) {
++			if (i < WMI_SMART_ANT_MAX_SERIAL_ANTENNA) {
++				gpio_param->gpio_pin = params->gpio_pin[i];
++				gpio_param->gpio_func = params->gpio_func[i];
++			} else {
++				gpio_param->gpio_pin = 0;
++				gpio_param->gpio_func = 0;
++			}
++		} else if (info->mode == WMI_SMART_ANT_MODE_PARALLEL) {
++			gpio_param->gpio_pin = params->gpio_pin[i];
++			gpio_param->gpio_func = params->gpio_func[i];
++		}
++		gpio_param->pdev_id = ar->pdev->pdev_id;
++		gpio_param++;
++	}
++
++	ret = ath11k_wmi_cmd_send(wmi, skb, WMI_PDEV_SMART_ANT_ENABLE_CMDID);
++	if (ret) {
++		ath11k_warn(ar->ab,
++			    "failed to send WMI_PDEV_SMART_ANT_ENABLE_CMDID\n");
++		dev_kfree_skb(skb);
++	}
++
++	kfree(params);
++	return ret;
++}
+--- a/drivers/net/wireless/ath/ath11k/wmi.h
++++ b/drivers/net/wireless/ath/ath11k/wmi.h
+@@ -11,6 +11,10 @@
+ 
+ struct ath11k_base;
+ struct ath11k;
++struct ath11k_vif;
++struct ath11k_smart_ant_info;
++struct ath11k_smart_ant_node_config_params;
++struct ath11k_smart_ant_train_info;
+ struct ath11k_fw_stats;
+ 
+ #define PSOC_HOST_MAX_NUM_SS (8)
+@@ -6633,6 +6637,101 @@ struct wmi_wow_ev_arg {
+ 	u32 data_len;
+ };
+ 
++/*Smart antenna related defs */
++
++#define WMI_SMART_ANT_MODE_SERIAL        0
++#define WMI_SMART_ANT_MODE_PARALLEL      1
++#define WMI_SMART_ANTENNA_HAL_MAX        4
++#define WMI_SMART_ANT_MAX_SERIAL_ANTENNA 2
++#define WMI_SMART_MAX_RATE_SERIES        2
++
++#define WMI_CCK_OFDM_RATES_MAX           12
++#define WMI_MCS_RATES_MAX                96
++#define WMI_RATE_COUNT_MAX               4
++
++struct wmi_peer_ratecode_list_fixed_param {
++	struct wmi_mac_addr macaddr;
++	u32 ratecount;
++	u32 vdev_id;
++	u32 pdev_id;
++} __packed;
++
++struct wmi_peer_cck_ofdm_rate_info {
++	u32 ratecode_legacy;
++} __packed;
++
++struct wmi_peer_mcs_rate_info {
++	u32 rt_code_20;
++	u32 rt_code_40;
++	u32 rt_code_80;
++} __packed;
++
++struct wmi_pdev_set_smart_ant_cmd {
++	u32 tlv_header;
++	union {
++		u32 mac_id;
++		u32 pdev_id;
++	};
++	u32 enable;
++	u32 mode;
++	u32 rx_antenna;
++	u32 tx_default_antenna;
++} __packed;
++
++struct wmi_pdev_smart_ant_gpio_handle_cmd {
++	u32 tlv_header;
++	u32 gpio_pin;
++	u32 gpio_func;
++	u32 pdev_id;
++} __packed;
++
++struct wmi_pdev_set_rx_antenna_cmd {
++	u32 tlv_header;
++	union {
++		u32 mac_id;
++		u32 pdev_id;
++	};
++	u32 rx_antenna;
++} __packed;
++
++struct wmi_pdev_set_tx_antenna_cmd {
++	u32 tlv_header;
++	u32 vdev_id;
++	struct wmi_mac_addr macaddr;
++} __packed;
++
++struct wmi_peer_set_smart_tx_ant_series_cmd {
++	u32 tlv_header;
++	u32 ant_series;
++} __packed;
++
++struct wmi_peer_set_smart_ant_train_ant_fixed_param_cmd {
++	u32 tlv_header;
++	u32 vdev_id;
++	struct wmi_mac_addr macaddr;
++	u32 numpkts;
++} __packed;
++
++struct wmi_peer_set_smart_ant_train_ant_param {
++	u32 tlv_header;
++	union {
++		u32 train_rate_series;
++		u32 train_rate_series_lo;
++	};
++	u32 train_antenna_series;
++	/* Rate control flags for future use */
++	u32 rc_flags;
++	u32 train_rate_series_hi;
++} __packed;
++
++struct wmi_peer_set_smart_ant_node_config_ops_cmd {
++	u32 tlv_header;
++	u32 vdev_id;
++	struct wmi_mac_addr mac_addr;
++	u32 cmd_id;
++	u32 args_count;
++} __packed;
++
+ int ath11k_wmi_cmd_send(struct ath11k_pdev_wmi *wmi, struct sk_buff *skb,
+ 			u32 cmd_id);
+ struct sk_buff *ath11k_wmi_alloc_skb(struct ath11k_wmi_base *wmi_sc, u32 len);
+@@ -6806,4 +6905,22 @@ int ath11k_wmi_peer_set_cfr_capture_conf
+ 					 u32 vdev_id, const u8 *mac,
+ 					 struct wmi_peer_cfr_capture_conf_arg *arg);
+ int ath11k_wmi_pdev_get_ani_level(struct ath11k *ar, u32 param_id, u8 pdev_id);
++int ath11k_wmi_pdev_enable_smart_ant(struct ath11k *ar,
++				     struct ath11k_smart_ant_info *info);
++int ath11k_wmi_pdev_disable_smart_ant(struct ath11k *ar,
++				      struct ath11k_smart_ant_info *info);
++int ath11k_wmi_peer_set_smart_tx_ant(struct ath11k *ar, u32 vdev_id,
++				     const u8 *macaddr, const u32 *tx_antenna);
++int ath11k_wmi_pdev_set_rx_ant(struct ath11k *ar, u32 antenna);
++int
++ath11k_wmi_peer_set_smart_ant_node_config(struct ath11k *ar, u8 *mac,
++					  struct ath11k_smart_ant_node_config_params *param);
++int
++ath11k_wmi_peer_set_smart_ant_train_info(struct ath11k *ar, u32 vdev_id,
++					 u8 *mac,
++					 struct ath11k_smart_ant_train_info *param);
++int
++ath11k_wmi_peer_set_smart_ant_train_ant_param_cmd(struct ath11k *ar,
++						  u32 vdev_id, const u8 *macaddr,
++						  const struct wmi_peer_set_smart_ant_train_ant_fixed_param_cmd *arg);
+ #endif
+--- a/local-symbols
++++ b/local-symbols
+@@ -142,6 +142,7 @@ ATH11K_TRACING=
+ ATH11K_SPECTRAL=
+ ATH11K_PKTLOG=
+ ATH11K_CFR=
++ATH11K_SMART_ANT_ALG=
+ WLAN_VENDOR_ATMEL=
+ ATMEL=
+ PCI_ATMEL=
+--- /dev/null
++++ b/drivers/net/wireless/ath/ath11k/smart_ant_api.c
+@@ -0,0 +1,342 @@
++/* SPDX-License-Identifier: BSD-3-Clause-Clear */
++/*
++ * Copyright (c) 2015, 2021 The Linux Foundation. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted (subject to the limitations in the
++ * disclaimer below) provided that the following conditions are met:
++ *
++ * Redistributions of source code must retain the above copyright
++ * notice, this list of conditions and the following disclaimer.
++ *
++ * Redistributions in binary form must reproduce the above copyright
++ * notice, this list of conditions and the following disclaimer in the
++ * documentation and/or other materials provided with the
++ * distribution.
++ *
++ * Neither the name of  The Linux Foundation nor the names of its
++ * contributors may be used to endorse or promote products derived
++ * from this software without specific prior written permission.
++
++ * NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE
++ * GRANTED BY THIS LICENSE.  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT
++ * HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
++ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
++ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
++ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
++ * BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
++ * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
++ * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "debug.h"
++#include "wmi.h"
++#include "smart_ant.h"
++
++static int smart_ant_alg_get_streams(u32 nss)
++{
++	u32 num_chains = 0, supp_tx_chainmask = (1 << nss) - 1;
++	int i;
++
++	for (i = 0; i < ATH11K_SMART_ANT_MAX_CHAINS; i++) {
++		if (supp_tx_chainmask & (1 << i))
++			num_chains++;
++	}
++
++	return min(num_chains, nss);
++}
++
++static void smart_ant_alg_init_param(struct ath11k *ar)
++{
++	struct ath11k_smart_ant_info *info = &ar->smart_ant_info;
++	struct ath11k_smart_ant_params *sa_params =
++					&ar->smart_ant_info.smart_ant_params;
++	u32 nss;
++
++	nss = get_num_chains(ar->cfg_tx_chainmask) ? : 1;
++	info->mode = WMI_SMART_ANT_MODE_PARALLEL;
++	info->default_ant = ATH11K_SMART_ANT_DEFAULT_ANT;
++	info->num_fallback_rate = ATH11K_SMART_ANT_FALLBACK_RATE_DEFAULT;
++	info->txrx_feedback = ATH11K_SMART_ANT_TX_FEEDBACK |
++			      ATH11K_SMART_ANT_RX_FEEDBACK;
++
++	sa_params->low_rate_threshold  	= ATH11K_SMART_ANT_PER_MIN_THRESHOLD;
++	sa_params->hi_rate_threshold 	= ATH11K_SMART_ANT_PER_MAX_THRESHOLD;
++	sa_params->per_diff_threshold	= ATH11K_SMART_ANT_PER_DIFF_THRESHOLD;
++	sa_params->num_train_pkts	= 0;
++	sa_params->pkt_len		= ATH11K_SMART_ANT_PKT_LEN_DEFAULT;
++	sa_params->num_tx_ant_comb	= 1 << smart_ant_alg_get_streams(nss);
++	sa_params->num_min_pkt		= ATH11K_SMART_ANT_NUM_PKT_MIN;
++	sa_params->retrain_interval	= msecs_to_jiffies(
++						ATH11K_SMART_ANT_RETRAIN_INTVL);
++	sa_params->perf_train_interval	= msecs_to_jiffies(
++						ATH11K_SMART_ANT_PERF_TRAIN_INTVL);
++	sa_params->max_perf_delta	= ATH11K_SMART_ANT_TPUT_DELTA_DEFAULT;
++	sa_params->hysteresis		= ATH11K_SMART_ANT_HYSTERISYS_DEFAULT;
++	sa_params->min_goodput_threshold =
++				ATH11K_SMART_ANT_MIN_GOODPUT_THRESHOLD;
++	sa_params->avg_goodput_interval	= ATH11K_SMART_ANT_GOODPUT_INTVL_AVG;
++	sa_params->ignore_goodput_interval =
++				ATH11K_SMART_ANT_IGNORE_GOODPUT_INTVL;
++	sa_params->num_pretrain_pkts = ATH11K_SMART_ANT_PRETRAIN_PKTS_MAX;
++	sa_params->num_other_bw_pkts_threshold = ATH11K_SMART_ANT_BW_THRESHOLD;
++	sa_params->enabled_train = ATH11K_SMART_ANT_TRAIN_INIT |
++				   ATH11K_SMART_ANT_TRAIN_TRIGGER_PERIODIC |
++				   ATH11K_SMART_ANT_TRAIN_TRIGGER_PERF |
++				   ATH11K_SMART_ANT_TRAIN_TRIGGER_RX;
++	sa_params->num_pkt_min_threshod[ATH11K_SMART_ANT_BW_20] =
++				ATH11K_SMART_ANT_NUM_PKT_THRESHOLD_20;
++	sa_params->num_pkt_min_threshod[ATH11K_SMART_ANT_BW_40] =
++				ATH11K_SMART_ANT_NUM_PKT_THRESHOLD_40;
++	sa_params->num_pkt_min_threshod[ATH11K_SMART_ANT_BW_80] =
++				ATH11K_SMART_ANT_NUM_PKT_THRESHOLD_80;
++	sa_params->default_tx_ant	= ATH11K_SMART_ANT_DEFAULT_ANT;
++	sa_params->ant_change_ind	= 0;
++	sa_params->max_train_ppdu	= ATH11K_SMART_ANT_NUM_TRAIN_PPDU_MAX;
++	sa_params->num_rx_chain		= nss;
++	if (nss > ATH11K_SMART_ANT_MAX_RX_CHAIN)
++		sa_params->num_rx_chain = ATH11K_SMART_ANT_MAX_RX_CHAIN;
++}
++
++void ath11k_smart_ant_alg_sta_disconnect(struct ath11k *ar,
++					 struct ieee80211_sta *sta)
++{
++	struct ath11k_sta *arsta = (struct ath11k_sta *)sta->drv_priv;
++
++	if (!ath11k_smart_ant_enabled(ar) || !arsta->smart_ant_sta)
++		return;
++
++	ath11k_dbg(ar->ab, ATH11K_DBG_SMART_ANT,
++		   "Smart antenna disconnect for %pM\n", sta->addr);
++
++	kfree(arsta->smart_ant_sta);
++}
++
++int ath11k_smart_ant_alg_sta_connect(struct ath11k *ar,
++				     struct ath11k_vif *arvif,
++				     struct ieee80211_sta *sta)
++{
++	struct ath11k_sta *arsta = (struct ath11k_sta *)sta->drv_priv;
++	struct ath11k_smart_ant_node_config_params params;
++	struct ath11k_smart_ant_sta *smart_ant_sta;
++	int ret;
++	u8 mac_addr[ETH_ALEN];
++
++	lockdep_assert_held(&ar->conf_mutex);
++
++	if (arvif->vdev_type != WMI_VDEV_TYPE_AP ||
++	    arvif->vdev_subtype != WMI_VDEV_SUBTYPE_NONE)
++		return 0;
++
++	memset(&params, 0, sizeof(params));
++
++	params.cmd_id = 1;
++	params.arg_count = 1;
++	params.vdev_id = arsta->arvif->vdev_id;
++	params.arg_arr = ATH11K_SMART_ANT_TX_FEEDBACK_CONFIG_DEFAULT;
++	ether_addr_copy(mac_addr, sta->addr);
++
++	ret = ath11k_wmi_peer_set_smart_ant_node_config(ar, mac_addr, &params);
++	if (ret) {
++		ath11k_warn(ar->ab, "Failed to set feedback config\n");
++		return ret;
++	}
++
++	smart_ant_sta = kzalloc(sizeof(struct ath11k_smart_ant_sta), GFP_ATOMIC);
++	if (!smart_ant_sta) {
++		ath11k_warn(ar->ab, "Failed to allocate smart ant sta\n");
++		ret = -EINVAL;
++		return ret;
++	}
++
++	arsta->smart_ant_sta = smart_ant_sta;
++
++	return 0;
++}
++
++int ath11k_smart_ant_alg_set_default(struct ath11k_vif *arvif)
++{
++	struct ath11k *ar = arvif->ar;
++	struct ath11k_smart_ant_info *info = &ar->smart_ant_info;
++	int ret, i;
++	u32 tx_ants[ATH11K_SMART_ANT_MAX_RATE_SERIES];
++
++	lockdep_assert_held(&ar->conf_mutex);
++
++	if (!ath11k_smart_ant_enabled(ar))
++		return 0;
++
++	if (!info->enabled)
++		return 0;
++
++	if (arvif->vdev_type != WMI_VDEV_TYPE_AP ||
++	    arvif->vdev_subtype != WMI_VDEV_SUBTYPE_NONE) {
++		ath11k_dbg(ar->ab, ATH11K_DBG_SMART_ANT,
++			   "Smart antenna logic not enabled for non-AP interface\n");
++		return 0;
++	}
++
++	/* Set default tx/rx antennas to start with */
++	ret = ath11k_wmi_pdev_set_rx_ant(ar, info->default_ant);
++	if (ret) {
++		ath11k_warn(ar->ab, "Failed to set rx antenna\n");
++		return ret;
++	}
++
++	/* Tx antenna for every fallback rate series */
++	for (i = 0; i < info->num_fallback_rate; i++)
++		tx_ants[i] = info->default_ant;
++
++	ret = ath11k_wmi_peer_set_smart_tx_ant(ar, arvif->vdev_id,
++					       arvif->vif->addr, tx_ants);
++	if (ret)
++		ath11k_warn(ar->ab, "Failed to set tx antenna\n");
++
++	return ret;
++}
++
++void ath11k_smart_ant_alg_disable(struct ath11k_vif *arvif)
++{
++	struct ath11k *ar = arvif->ar;
++	struct ath11k_smart_ant_info *info = &ar->smart_ant_info;
++	int ret;
++
++	lockdep_assert_held(&ar->conf_mutex);
++
++	if (!ath11k_smart_ant_enabled(ar))
++		return;
++
++	if (!info->enabled)
++		return;
++
++	if (arvif->vdev_type != WMI_VDEV_TYPE_AP ||
++	    arvif->vdev_subtype != WMI_VDEV_SUBTYPE_NONE)
++		return;
++
++	/* See if this is the last vif requesting to disable smart antenna */
++	info->num_enabled_vif--;
++	if (info->num_enabled_vif != 0)
++		return;
++
++	/* Disable smart antenna logic in fw */
++	ret = ath11k_wmi_pdev_disable_smart_ant(ar, info);
++	if (ret) {
++		ath11k_err(ar->ab, "Wmi command to disable smart antenna is failed\n");
++		return;
++	}
++
++	info->enabled = false;
++}
++
++int ath11k_smart_ant_alg_enable(struct ath11k_vif *arvif)
++{
++	struct ath11k *ar = arvif->ar;
++	struct ath11k_smart_ant_info *info = &ar->smart_ant_info;
++	int ret;
++
++	lockdep_assert_held(&ar->conf_mutex);
++
++	if (!ath11k_smart_ant_enabled(ar))
++		return 0;
++
++	/* Smart antenna is tested with only AP mode, it can also be enabled
++	 * for other modes, just needs more testing.
++	 */
++	if (arvif->vdev_type != WMI_VDEV_TYPE_AP ||
++	    arvif->vdev_subtype != WMI_VDEV_SUBTYPE_NONE) {
++		ath11k_dbg(ar->ab, ATH11K_DBG_SMART_ANT,
++			   "Smart antenna logic not enabled for non-AP interface\n");
++		return 0;
++	}
++
++	info->num_enabled_vif++;
++	if (info->enabled)
++		return 0;
++
++	smart_ant_alg_init_param(ar);
++
++	ath11k_dbg(ar->ab, ATH11K_DBG_SMART_ANT,
++		   "Hw supports Smart antenna, enabling it in driver\n");
++
++	info->enabled = true;
++
++	ath11k_dbg(ar->ab, ATH11K_DBG_SMART_ANT,
++		   "smart mode: %d num_fallback_rate: %d num_rx_chain: %d info_enable: %d\n",
++		   ar->smart_ant_info.mode, ar->smart_ant_info.num_fallback_rate,
++		   ar->smart_ant_info.smart_ant_params.num_rx_chain, info->enabled);
++
++	/* Enable smart antenna logic in fw with mode and default antenna */
++	ret = ath11k_wmi_pdev_enable_smart_ant(ar, info);
++	if (ret) {
++		ath11k_err(ar->ab, "Wmi command to enable smart antenna is failed\n");
++		return ret;
++	}
++
++	return 0;
++}
++
++static void ath11k_smart_ant_dbg_feedback(struct ath11k_base *ab,
++					  struct ath11k_smart_ant_tx_feedback *fb)
++{
++	ath11k_dbg(ab, ATH11K_DBG_SMART_ANT,
++		   "Tx feedback npkts: %d nbad: %d tx_antenna[0]: %d tx_antenna[1]: %d "
++		   "train pkt: %s goodput: %d rate_maxphy: [0x%x|0x%x|0x%x|0x%x] "
++		   "RSSI: [%d %d %d]\n",
++		   fb->npackets, fb->nbad, fb->tx_antenna[0], fb->tx_antenna[0],
++		   fb->is_trainpkt ? "True" : "False", fb->goodput, fb->ratemaxphy[0],
++		   fb->ratemaxphy[1], fb->ratemaxphy[2], fb->ratemaxphy[3], fb->rssi[0],
++		   fb->rssi[1], fb->rssi[2]);
++}
++
++static void ath11k_smart_ant_tx_fb_fill(struct ath11k_base *ab, u32 *data,
++					struct ath11k_smart_ant_tx_feedback *fb)
++{
++	int i;
++
++	fb->npackets = TXFD_MS(data, ATH11K_SMART_ANT_NPKTS);
++	fb->nbad = fb->npackets - TXFD_MS(data, ATH11K_SMART_ANT_NSUCC);
++
++	for (i = 0; i < ATH11K_SMART_ANT_MAX_SA_RSSI_CHAINS; i++)
++		fb->rssi[i] = data[ATH11K_SMART_ANT_RSSI + i];
++
++	fb->tx_antenna[0] = TXFD_MS(data, ATH11K_SMART_ANT_TX_ANT);
++	fb->is_trainpkt = TXFD_MS(data, ATH11K_SMART_ANT_IS_TRAIN_PKT);
++	if (fb->is_trainpkt)
++		fb->goodput = TXFD_MS(data, ATH11K_SMART_ANT_TRAIN_PKTS);
++
++	for (i = 0; i < ATH11K_SMART_ANT_MAX_RATE_COUNTERS; i++)
++		fb->ratemaxphy[i] = TXFD_MS(data, ATH11K_SMART_ANT_MAX_RATE);
++
++	ath11k_smart_ant_dbg_feedback(ab, fb);
++}
++
++void ath11k_smart_ant_alg_proc_tx_feedback(struct ath11k_base *ab, u32 *data,
++					   u16 peer_id)
++{
++	struct ath11k_sta *arsta;
++	struct ath11k_peer *peer = NULL;
++	struct ath11k_smart_ant_tx_feedback tx_feedback;
++
++	rcu_read_lock();
++	spin_lock_bh(&ab->base_lock);
++	peer = ath11k_peer_find_by_id(ab, peer_id);
++	if(peer && peer->sta) {
++		arsta = (struct ath11k_sta *)peer->sta->drv_priv;
++
++		if (!arsta->smart_ant_sta)
++			goto exit;
++
++		memset(&tx_feedback, 0, sizeof(tx_feedback));
++		ath11k_dbg(ab, ATH11K_DBG_SMART_ANT, "Tx feedback from sta: %pM\n",
++			   peer->addr);
++		ath11k_smart_ant_tx_fb_fill(ab, data, &tx_feedback);
++
++	}
++exit:
++	spin_unlock_bh(&ab->base_lock);
++	rcu_read_unlock();
++}
+--- /dev/null
++++ b/drivers/net/wireless/ath/ath11k/smart_ant_api.h
+@@ -0,0 +1,348 @@
++/* SPDX-License-Identifier: BSD-3-Clause-Clear */
++/*
++ * Copyright (c) 2015, 2021 The Linux Foundation. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted (subject to the limitations in the
++ * disclaimer below) provided that the following conditions are met:
++ *
++ * Redistributions of source code must retain the above copyright
++ * notice, this list of conditions and the following disclaimer.
++ *
++ * Redistributions in binary form must reproduce the above copyright
++ * notice, this list of conditions and the following disclaimer in the
++ * documentation and/or other materials provided with the
++ * distribution.
++ *
++ * Neither the name of  The Linux Foundation nor the names of its
++ * contributors may be used to endorse or promote products derived
++ * from this software without specific prior written permission.
++
++ * NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE
++ * GRANTED BY THIS LICENSE.  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT
++ * HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
++ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
++ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
++ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
++ * BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
++ * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
++ * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef _SMART_ANT_ALG_
++#define _SMART_ANT_ALG_
++
++#define ATH11K_SMART_ANT_FALLBACK_RATE_DEFAULT  1
++#define ATH11K_SMART_ANT_TX_FEEDBACK            0x10
++#define ATH11K_SMART_ANT_RX_FEEDBACK            0x20
++#define ATH11K_SMART_ANT_PER_MIN_THRESHOLD      20
++#define ATH11K_SMART_ANT_PER_MAX_THRESHOLD      80
++#define ATH11K_SMART_ANT_PER_DIFF_THRESHOLD     3
++#define ATH11K_SMART_ANT_PKT_LEN_DEFAULT        1536
++#define ATH11K_SMART_ANT_MAX_CHAINS             4
++#define ATH11K_SMART_ANT_NUM_PKT_MIN            344
++#define ATH11K_SMART_ANT_RETRAIN_INTVL          (2 * 60000)     /* msecs */
++#define ATH11K_SMART_ANT_PERF_TRAIN_INTVL       2000            /* msecs */
++#define ATH11K_SMART_ANT_TPUT_DELTA_DEFAULT     10
++#define ATH11K_SMART_ANT_HYSTERISYS_DEFAULT     3
++#define ATH11K_SMART_ANT_MIN_GOODPUT_THRESHOLD  6
++#define ATH11K_SMART_ANT_GOODPUT_INTVL_AVG      2
++#define ATH11K_SMART_ANT_IGNORE_GOODPUT_INTVL   1
++#define ATH11K_SMART_ANT_PRETRAIN_PKTS_MAX      600
++#define ATH11K_SMART_ANT_BW_THRESHOLD           64
++#define ATH11K_SMART_ANT_NUM_PKT_THRESHOLD_20   20
++#define ATH11K_SMART_ANT_NUM_PKT_THRESHOLD_40   10
++#define ATH11K_SMART_ANT_NUM_PKT_THRESHOLD_80   5
++#define ATH11K_SMART_ANT_DEFAULT_ANT            5
++#define ATH11K_SMART_ANT_NUM_TRAIN_PPDU_MAX     50
++#define ATH11K_SMART_ANT_MAX_RX_CHAIN           4
++#define ATH11K_SMART_ANT_MAX_RATE_SERIES        4
++#define ATH11K_SMART_ANT_BYTES_IN_DWORD         4
++#define ATH11K_SMART_ANT_MASK_BYTES             0xff
++#define ATH11K_SMART_ANT_LEGACY_RATE_WORDS      6
++#define ATH11K_SMART_ANT_WORDS_IN_DWORD         2
++#define ATH11K_SMART_ANT_WORD_BITS_LEN          16
++#define ATH11K_SMART_ANT_MASK_RCODE             0x7ff
++#define ATH11K_SMART_ANT_MAX_HT_RATE_WORDS      48
++#define ATH11K_SMART_ANT_MAX_RATES              44
++#define ATH11K_SMART_ANT_RSSI_SAMPLE            10
++#define ATH11K_SMART_ANT_MAX_RETRY		8
++#define ATH11K_SMART_ANT_MAX_SA_RSSI_CHAINS	8
++#define ATH11K_SMART_ANT_MAX_RATE_COUNTERS	4
++
++#define ATH11K_SMART_ANT_MAX_COMB_FB		2
++
++#define ATH11K_SMART_ANT_TX_FEEDBACK_CONFIG_DEFAULT 0xe4
++
++/* Max number of antenna combinations 2 ^ max_supported_ant */
++#define ATH11K_SMART_ANT_COMB_MAX               16
++
++#define ATH11K_SMART_ANT_PIN0	14
++#define ATH11K_SMART_ANT_PIN1	15
++#define ATH11K_SMART_ANT_FUNC0	5
++#define ATH11K_SMART_ANT_FUNC1	5
++
++#define ATH11K_SMART_ANT_NPKTS		3
++#define ATH11K_SMART_ANT_NPKTS_M	0xffff
++#define ATH11K_SMART_ANT_NPKTS_S	0
++
++#define ATH11K_SMART_ANT_NSUCC		3
++#define ATH11K_SMART_ANT_NSUCC_M	0xffff0000
++#define ATH11K_SMART_ANT_NSUCC_S	16
++
++#define ATH11K_SMART_ANT_RSSI		5
++
++#define ATH11K_SMART_ANT_TX_ANT		5
++#define ATH11K_SMART_ANT_TX_ANT_M	0xffffffff
++#define ATH11K_SMART_ANT_TX_ANT_S	0
++
++#define ATH11K_SMART_ANT_IS_TRAIN_PKT	6
++#define ATH11K_SMART_ANT_IS_TRAIN_PKT_M	0x10000
++#define ATH11K_SMART_ANT_IS_TRAIN_PKT_S	16
++
++#define ATH11K_SMART_ANT_TRAIN_PKTS	6
++#define ATH11K_SMART_ANT_TRAIN_PKTS_M	0xffff
++#define ATH11K_SMART_ANT_TRAIN_PKTS_S	0
++
++#define ATH11K_SMART_ANT_MAX_RATE	7
++#define ATH11K_SMART_ANT_MAX_RATE_M	0xffffffff
++#define ATH11K_SMART_ANT_MAX_RATE_S	0
++
++#define TXFD_MS(data, info) \
++		((data[info] & info## _M) >> info## _S)
++
++enum ath11k_smart_ant_bw {
++	ATH11K_SMART_ANT_BW_20,
++	ATH11K_SMART_ANT_BW_40,
++	ATH11K_SMART_ANT_BW_80,
++	ATH11K_SMART_ANT_BW_MAX
++};
++
++enum ath11k_smart_ant_train_trigger {
++	ATH11K_SMART_ANT_TRAIN_INIT              = 1 << 0,
++	ATH11K_SMART_ANT_TRAIN_TRIGGER_PERIODIC  = 1 << 1,
++	ATH11K_SMART_ANT_TRAIN_TRIGGER_PERF      = 1 << 2,
++	ATH11K_SMART_ANT_TRAIN_TRIGGER_RX        = 1 << 4,
++};
++
++enum ath11k_smart_ant_band_id {
++	ATH11K_SMART_ANT_BAND_UNSPECIFIED = 0,
++	ATH11K_SMART_ANT_BAND_2GHZ	  = 1,
++	ATH11K_SMART_ANT_BAND_5GHZ	  = 2,
++	ATH11K_SMART_ANT_BAND_6GHZ	  = 3,
++	ATH11K_SMART_ANT_BAND_MAX,
++
++};
++
++enum ath11k_wireless_mode {
++	ATH11K_WIRELESS_MODE_LEGACY,
++	ATH11K_WIRELESS_MODE_HT,
++	ATH11K_WIRELESS_MODE_VHT,
++};
++
++struct ath11k_smart_ant_node_config_params {
++	u8 vdev_id;
++	u32 cmd_id;
++	u16 arg_count;
++	u32 *arg_arr;
++};
++
++struct ath11k_smart_ant_peer_phy_info {
++	u8 rxstreams;
++	u8 streams;
++	u8 cap;
++	u32 mode;
++	u32 ext_mode;
++};
++
++struct ath11k_smart_ant_ratetoindex {
++	u8 ratecode;
++	u8 rateindex;
++};
++
++struct ath11k_smart_ant_rate_info {
++	struct ath11k_smart_ant_ratetoindex rates[ATH11K_SMART_ANT_MAX_RATES];
++	u8 num_of_rates;
++	u8 selected_antenna;
++};
++
++struct ath11k_smart_ant_train_info {
++	u8 vdev_id;
++	u32 rate_array[ATH11K_SMART_ANT_MAX_RATE_SERIES];
++	u32 antenna_array[ATH11K_SMART_ANT_MAX_RX_CHAIN];
++	u32 numpkts;
++};
++
++struct ath11k_smart_ant_train_data {
++	u32 antenna;
++	u32 ratecode;
++	u16 nframes;
++	u16 nbad;
++	u8 rssi[ATH11K_SMART_ANT_MAX_CHAINS][ATH11K_SMART_ANT_RSSI_SAMPLE];
++	u16 last_nframes;
++	u16 numpkts;
++	u8 cts_prot;
++	u8 samples;
++};
++
++struct ath11k_peer_rate_code_list_cap {
++	u32 rtcode_legacy[WMI_CCK_OFDM_RATES_MAX];
++	u32 rtcode_20[WMI_MCS_RATES_MAX];
++	u32 rtcode_40[WMI_MCS_RATES_MAX];
++	u32 rtcode_80[WMI_MCS_RATES_MAX];
++	u32 rt_count[WMI_RATE_COUNT_MAX];
++};
++
++struct ath11k_smart_ant_comb_fb {
++	u8 nbad;
++	u8 npkts;
++	u8 bw;
++	u8 rate;
++};
++
++struct ath11k_smart_ant_tx_feedback {
++	u16 npackets;
++	u16 nbad;
++	u16 nshort_retries[ATH11K_SMART_ANT_MAX_RETRY];
++	u16 nlong_retries[ATH11K_SMART_ANT_MAX_RETRY];
++	u32 tx_antenna[ATH11K_SMART_ANT_MAX_RATE_SERIES];
++	u32 rssi[ATH11K_SMART_ANT_MAX_SA_RSSI_CHAINS];
++	u32 rate_mcs[ATH11K_SMART_ANT_MAX_RATE_SERIES];
++	u8 rate_index;
++	u8 is_trainpkt;
++	u16 ratemaxphy[ATH11K_SMART_ANT_MAX_RATE_COUNTERS];
++	u32 goodput;
++	u8 num_comb_feedback;
++	struct ath11k_smart_ant_comb_fb comb_fb[ATH11K_SMART_ANT_MAX_COMB_FB];
++};
++
++struct ath11k_smart_ant_sta {
++	struct ath11k *ar;
++	u8 mac_addr[ETH_ALEN];
++	u8 max_bw;
++	u8 txrx_chainmask;
++	u8 mode;
++	enum ath11k_wireless_mode wmode;
++	u8 channel;
++	enum ath11k_smart_ant_band_id band;
++	u32 ni_cap;
++	struct ath11k_peer_rate_code_list_cap rate_cap;
++	struct ath11k_smart_ant_train_info train_info;
++	struct ath11k_smart_ant_train_data train_data;
++	struct ath11k_smart_ant_tx_feedback tx_feedback;
++};
++
++/**
++ * struct smart_ant_enable_params - Smart antenna params
++ * @enable: Enable/Disable
++ * @mode: SA mode
++ * @rx_antenna: RX antenna config
++ * @gpio_pin : GPIO pin config
++ * @gpio_func : GPIO function config
++ */
++struct smart_ant_enable_params {
++	u32 gpio_pin[WMI_SMART_ANTENNA_HAL_MAX];
++	u32 gpio_func[WMI_SMART_ANTENNA_HAL_MAX];
++};
++
++struct smart_ant_tx_ant_params {
++	u32 *antenna_array;
++	u8 vdev_id;
++};
++
++struct ath11k_smart_ant_params {
++	u8 low_rate_threshold;
++	u8 hi_rate_threshold;
++	u8 per_diff_threshold;
++	u16 num_train_pkts;
++	u16 pkt_len;
++	u8 num_tx_ant_comb;
++	u8 num_rx_chain;
++	u16 num_min_pkt;
++	u32 retrain_interval;
++	u32 perf_train_interval;
++	u8 max_perf_delta;
++	u8 hysteresis;
++	u8 min_goodput_threshold;
++	u8 avg_goodput_interval;
++	u8 ignore_goodput_interval;
++	u16 num_pretrain_pkts;
++	u16 num_other_bw_pkts_threshold;
++	u8 enabled_train;
++	u16 num_pkt_min_threshod[ATH11K_SMART_ANT_BW_MAX];
++	u32 default_tx_ant;
++	u8 ant_change_ind;
++	u16 max_train_ppdu;
++};
++
++struct ath11k_smart_ant_info {
++	struct ath11k_smart_ant_params smart_ant_params;
++	u8 num_fallback_rate;
++	enum ath11k_smart_ant_band_id band_id;
++	u8 txrx_chainmask;
++	u32 txrx_feedback;
++	u32 default_ant;
++	u32 rx_antenna;
++	u8 num_sta_per_ant[ATH11K_SMART_ANT_COMB_MAX];
++	u16 num_sta_conneted;
++	u8 mode;
++	bool enabled;
++	u32 num_enabled_vif;
++};
++
++#ifdef CPTCFG_ATH11K_SMART_ANT_ALG
++int ath11k_smart_ant_alg_enable(struct ath11k_vif *arvif);
++void ath11k_smart_ant_alg_disable(struct ath11k_vif *arvif);
++int ath11k_smart_ant_alg_set_default(struct ath11k_vif *arvif);
++int ath11k_smart_ant_alg_sta_connect(struct ath11k *ar,
++				     struct ath11k_vif *arvif,
++				     struct ieee80211_sta *sta);
++void ath11k_smart_ant_alg_sta_disconnect(struct ath11k *ar,
++					 struct ieee80211_sta *sta);
++void ath11k_smart_ant_alg_proc_tx_feedback(struct ath11k_base *ab, u32 *data,
++					   u16 peer_id);
++#else
++static inline
++int ath11k_smart_ant_alg_enable(struct ath11k_vif *arvif)
++{
++	return 0;
++}
++
++static inline
++void ath11k_smart_ant_alg_disable(struct ath11k_vif *arvif)
++{
++}
++
++static inline
++int ath11k_smart_ant_alg_set_default(struct ath11k_vif *arvif)
++{
++	return 0;
++}
++
++static inline
++int ath11k_smart_ant_alg_sta_connect(struct ath11k *ar,
++				     struct ath11k_vif *arvif,
++				     struct ieee80211_sta *sta)
++{
++	return 0;
++}
++
++static inline
++void ath11k_smart_ant_alg_sta_disconnect(struct ath11k *ar,
++					 struct ieee80211_sta *sta)
++{
++}
++
++static inline
++void ath11k_smart_ant_alg_proc_tx_feedback(struct ath11k_base *ab,
++					   u32 *data,
++					   u16 peer_id)
++{
++}
++
++#endif /* CPTCFG_ATH11K_SMART_ANT_ALG */
++#endif /* _SMART_ANT_ALG_ */
+--- a/drivers/net/wireless/ath/ath11k/dp.h
++++ b/drivers/net/wireless/ath/ath11k/dp.h
+@@ -1529,6 +1529,9 @@ enum  htt_ppdu_stats_usr_compln_status {
+ #define HTT_USR_CMPLTN_SHORT_RETRY(_val) \
+ 	    FIELD_GET(HTT_PPDU_STATS_USR_CMPLTN_CMN_FLAGS_SHORT_RETRY_M, _val)
+ 
++#define HTT_STATS_NUM_SUPPORTED_BW_SMART_ANTENNA 4
++#define HTT_STATS_MAX_CHAINS 8
++
+ struct htt_ppdu_stats_usr_cmpltn_cmn {
+ 	u8 status;
+ 	u8 tid_num;
+@@ -1537,7 +1540,29 @@ struct htt_ppdu_stats_usr_cmpltn_cmn {
+ 	u32 ack_rssi;
+ 	u16 mpdu_tried;
+ 	u16 mpdu_success;
+-	u32 flags; /* %HTT_PPDU_STATS_USR_CMPLTN_CMN_FLAGS_LONG_RETRIES*/
++	/* %HTT_PPDU_STATS_USR_CMPLTN_CMN_FLAGS_LONG_RETRIES
++	 * BIT [3 : 0] - long retries
++	 * BIT [7 : 4] - short_retries
++	 * BIT [8 : 8] - is_ampdu
++	 * BIT [12 : 9] - resp_type
++	 * BIT [15 : 13] - mprot_type
++	 * BIT [16 : 16] - rts_success
++	 * BIT [17 : 17] - rts_failure
++	 * BIT [18 : 18] - pream_punc_tx
++	 * BIT [31 : 19] - reserved0
++	 */
++	u32 flags;
++	u32 chain_rssi[HTT_STATS_MAX_CHAINS];
++	u32 tx_antenna_mask;
++	/* For SmartAntenna: Holds number of pending training packets during training. */
++	u16 pending_training_pkts;
++	/* BIT [0 : 0] - is_training: This flag indicates if peer is under training.
++	 * BIT [15 : 1] - reserved1:
++	 */
++	u16 is_training;
++	u32 max_rates[HTT_STATS_NUM_SUPPORTED_BW_SMART_ANTENNA];
++	u32 current_rate_per;
++	u32 sw_rts;
+ } __packed;
+ 
+ #define HTT_PPDU_STATS_ACK_BA_INFO_NUM_MPDU_M	GENMASK(8, 0)
+@@ -1559,7 +1584,6 @@ struct htt_ppdu_stats_usr_cmpltn_ack_ba_
+ #define HTT_PPDU_STATS_USR_CMN_FLAG_DELAYBA	BIT(14)
+ #define HTT_PPDU_STATS_USR_CMN_HDR_SW_PEERID	GENMASK(31, 16)
+ #define HTT_PPDU_STATS_USR_CMN_CTL_FRM_CTRL	GENMASK(15, 0)
+-#define HTT_STATS_MAX_CHAINS 8
+ #define HTT_PPDU_STATS_USER_CMN_TLV_TX_PWR_CHAINS_PER_U32 4
+ #define HTT_PPDU_STATS_USER_CMN_TX_PWR_ARR_SIZE HTT_STATS_MAX_CHAINS / \
+ 						HTT_PPDU_STATS_USER_CMN_TLV_TX_PWR_CHAINS_PER_U32
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -9,6 +9,7 @@
+ #include <crypto/hash.h>
+ #include "core.h"
+ #include "debug.h"
++#include "smart_ant.h"
+ #include "debugfs_htt_stats.h"
+ #include "debugfs_sta.h"
+ #include "hal_desc.h"
+@@ -1388,6 +1389,7 @@ static int ath11k_htt_tlv_ppdu_stats_par
+ 		memcpy((void *)&user_stats->cmpltn_cmn, ptr,
+ 		       sizeof(struct htt_ppdu_stats_usr_cmpltn_cmn));
+ 		user_stats->tlv_flags |= BIT(tag);
++		ath11k_smart_ant_proc_tx_feedback(ab, ptr, peer_id);
+ 		break;
+ 	case HTT_PPDU_STATS_TAG_USR_COMPLTN_ACK_BA_STATUS:
+ 		if (len <
+@@ -4073,6 +4075,8 @@ int ath11k_dp_rx_process_mon_status(stru
+ 			ath11k_rx_stats_buf_pktlog_process(ar, skb->data, log_type, rx_buf_sz);
+ 		}
+ 
++		ar->rx_antenna = ppdu_info->rx_antenna;
++
+ 		spin_unlock_bh(&ab->base_lock);
+ 		rcu_read_unlock();
+ 		dev_kfree_skb_any(skb);
+--- a/drivers/net/wireless/ath/ath11k/hal_rx.c
++++ b/drivers/net/wireless/ath/ath11k/hal_rx.c
+@@ -1590,9 +1590,12 @@ ath11k_hal_rx_parse_mon_status_tlv(struc
+ 	case HAL_RXPCU_PPDU_END_INFO: {
+ 		struct hal_rx_ppdu_end_duration *ppdu_rx_duration =
+ 			(struct hal_rx_ppdu_end_duration *)tlv_data;
++		ppdu_info->rx_antenna =
++			FIELD_GET(HAL_RX_PPDU_END_DURATION_INFO0_RX_ANTENNA,
++				  __le32_to_cpu(ppdu_rx_duration->info0));
+ 		ppdu_info->rx_duration =
+ 			FIELD_GET(HAL_RX_PPDU_END_DURATION,
+-				  __le32_to_cpu(ppdu_rx_duration->info0));
++				  __le32_to_cpu(ppdu_rx_duration->info1));
+ 		ppdu_info->tsft =ppdu_rx_duration->rsvd0[1];
+ 		ppdu_info->tsft = (ppdu_info->tsft << 32) | ppdu_rx_duration->rsvd0[0];
+ 		break;
+--- a/drivers/net/wireless/ath/ath11k/hal_rx.h
++++ b/drivers/net/wireless/ath/ath11k/hal_rx.h
+@@ -224,6 +224,7 @@ struct hal_rx_mon_ppdu_info {
+ 	struct hal_rx_user_status userstats[HAL_MAX_UL_MU_USERS];
+ 	u8 userid;
+ 	u16 ampdu_id[HAL_MAX_UL_MU_USERS];
++	u32 rx_antenna;
+ };
+ 
+ #define HAL_RX_UL_OFDMA_USER_INFO_V0_W0_VALID			BIT(30)
+@@ -473,10 +474,13 @@ struct hal_rx_mpdu_info {
+ } __packed;
+ 
+ #define HAL_RX_PPDU_END_DURATION	GENMASK(23, 0)
++#define HAL_RX_PPDU_END_DURATION_INFO0_RX_ANTENNA	GENMASK(23, 0)
+ struct hal_rx_ppdu_end_duration {
+-	__le32 rsvd0[9];
++	__le32 rsvd0[2];
+ 	__le32 info0;
+-	__le32 rsvd1[4];
++	__le32 rsvd1[6];
++	__le32 info1;
++	__le32 rsvd2[4];
+ } __packed;
+ 
+ struct hal_rx_rxpcu_classification_overview {

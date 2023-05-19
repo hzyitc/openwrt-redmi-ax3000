@@ -1,0 +1,74 @@
+From c089a5331636a2085f71d5c08446c5d58a929fc7 Mon Sep 17 00:00:00 2001
+From: Wen Gong <quic_wgong@quicinc.com>
+Date: Tue, 2 Nov 2021 17:16:06 +0530
+Subject: [PATCH] mac80211: use ieee802_11_parse_elems() in
+ ieee80211_prep_channel()
+
+In function ieee80211_prep_channel(), it has some ieee80211_bss_get_ie()
+and cfg80211_find_ext_ie() to get the IE, this is to use another
+function ieee802_11_parse_elems() to get all the IEs in one time which
+will be used in subsequent patch to parse the tx power envelope from
+HE operation IE.
+
+Signed-off-by: Wen Gong <quic_wgong@quicinc.com>
+Signed-off-by: Aditya Kumar Singh <quic_adisi@quicinc.com>
+---
+ net/mac80211/mlme.c | 20 +++++++++++++++-----
+ 1 file changed, 15 insertions(+), 5 deletions(-)
+
+--- a/net/mac80211/mlme.c
++++ b/net/mac80211/mlme.c
+@@ -4997,8 +4997,13 @@ static int ieee80211_prep_channel(struct
+ 	bool is_6ghz = cbss->channel->band == NL80211_BAND_6GHZ;
+ 	bool is_5ghz = cbss->channel->band == NL80211_BAND_5GHZ;
+ 	struct ieee80211_bss *bss = (void *)cbss->priv;
++	struct ieee802_11_elems *elems;
+ 	int ret;
+ 
++	elems = kzalloc(sizeof(*elems), GFP_KERNEL);
++	if (!elems)
++		return -ENOMEM;
++
+ 	sband = local->hw.wiphy->bands[cbss->channel->band];
+ 
+ 	ifmgd->flags &= ~(IEEE80211_STA_DISABLE_40MHZ |
+@@ -5067,6 +5072,9 @@ static int ieee80211_prep_channel(struct
+ 		const u8 *he_oper_ie;
+ 
+ 		ies = rcu_dereference(cbss->ies);
++		ieee802_11_parse_elems(ies->data, ies->len, false, elems,
++				       NULL, NULL);
++
+ 		he_oper_ie = cfg80211_find_ext_ie(WLAN_EID_EXT_HE_OPERATION,
+ 						  ies->data, ies->len);
+ 		if (he_oper_ie &&
+@@ -5105,7 +5113,8 @@ static int ieee80211_prep_channel(struct
+ 
+ 	if (ifmgd->flags & IEEE80211_STA_DISABLE_HE && is_6ghz) {
+ 		sdata_info(sdata, "Rejecting non-HE 6/7 GHz connection");
+-		return -EINVAL;
++		ret = -EINVAL;
++		goto out_no_lock;
+ 	}
+ 
+ 	/* will change later if needed */
+@@ -5123,15 +5132,17 @@ static int ieee80211_prep_channel(struct
+ 	/* don't downgrade for 5 and 10 MHz channels, though. */
+ 	if (chandef.width == NL80211_CHAN_WIDTH_5 ||
+ 	    chandef.width == NL80211_CHAN_WIDTH_10)
+-		goto out;
++		goto out_lock;
+ 
+ 	while (ret && chandef.width != NL80211_CHAN_WIDTH_20_NOHT) {
+ 		ifmgd->flags |= ieee80211_chandef_downgrade(&chandef);
+ 		ret = ieee80211_vif_use_channel(sdata, &chandef,
+ 						IEEE80211_CHANCTX_SHARED);
+ 	}
+- out:
++ out_lock:
+ 	mutex_unlock(&local->mtx);
++ out_no_lock:
++	kfree(elems);
+ 	return ret;
+ }
+ 

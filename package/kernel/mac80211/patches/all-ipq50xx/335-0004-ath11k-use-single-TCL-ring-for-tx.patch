@@ -1,0 +1,56 @@
+From e43739707804e9800c16e88af8e2087da82f4542 Mon Sep 17 00:00:00 2001
+From: Venkateswara Naralasetty <quic_vnaralas@quicinc.com>
+Date: Thu, 11 Nov 2021 12:02:27 +0530
+Subject: [PATCH] ath11k: use single TCL ring for tx
+
+Using single TCL ring is enough to achieve peak throughput
+for QCN6122 and IPQ5018.
+
+Signed-off-by: Venkateswara Naralasetty <quic_vnaralas@quicinc.com>
+---
+ drivers/net/wireless/ath/ath11k/core.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/net/wireless/ath/ath11k/core.c b/drivers/net/wireless/ath/ath11k/core.c
+index f2f2e5c..46150df 100644
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -349,7 +349,7 @@ static const struct ath11k_hw_params ath11k_hw_params[] = {
+ 		.rx_mac_buf_ring = false,
+ 		.vdev_start_delay = false,
+ 		.htt_peer_map_v2 = true,
+-		.tcl_0_only = false,
++		.tcl_0_only = true,
+ 		.spectral_max_fft_bins = 1024,
+ 		.spectral_summary_pad_sz = 16,
+ 		.spectral_fft_hdr_len = 24,
+@@ -359,7 +359,7 @@ static const struct ath11k_hw_params ath11k_hw_params[] = {
+ 		.fwmem_mode_change = false,
+ 		.cold_boot_calib = true,
+ 		.is_qdss_support = false,
+-		.max_tx_ring = DP_TCL_NUM_RING_MAX,
++		.max_tx_ring = 1,
+ 		.wakeup_mhi = false,
+ 		.reo_status_poll = true,
+ 		.num_vdevs_peers = ath11k_vdevs_peers_ipq5018,
+@@ -413,7 +413,7 @@ static const struct ath11k_hw_params ath11k_hw_params[] = {
+ 		.rx_mac_buf_ring = false,
+ 		.vdev_start_delay = false,
+ 		.htt_peer_map_v2 = true,
+-		.tcl_0_only = false,
++		.tcl_0_only = true,
+ 		.spectral_max_fft_bins = 1024,
+ 		.spectral_summary_pad_sz = 16,
+ 		.spectral_fft_hdr_len = 24,
+@@ -423,7 +423,7 @@ static const struct ath11k_hw_params ath11k_hw_params[] = {
+ 		.cold_boot_calib = true,
+  		.fwmem_mode_change = false,
+  		.is_qdss_support = true,
+-		.max_tx_ring = DP_TCL_NUM_RING_MAX,
++		.max_tx_ring = 1,
+ 		.wakeup_mhi = false,
+ 		.reo_status_poll = true,
+ 		.num_vdevs_peers = ath11k_vdevs_peers_ipq5018,
+-- 
+2.7.4
+

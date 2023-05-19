@@ -1,0 +1,750 @@
+From dc72723f1703985fba5d9dbaa16b680b49581ff5 Mon Sep 17 00:00:00 2001
+From: Sriram R <quic_srirrama@quicinc.com>
+Date: Sat, 25 Sep 2021 13:01:33 +0530
+Subject: [PATCH] mac80211: Mesh Fast xmit support
+
+Support Fast Xmit for mesh device types by caching the
+header corresponding to the DA.
+Only 6addr header format is supported in this version
+but has framework to extend to other formats as well.
+
+driver needs to advertise the support to enable this feature
+
+Signed-off-by: Sriram R <quic_srirrama@quicinc.com>
+---
+ include/net/mac80211.h       |   1 +
+ include/uapi/linux/nl80211.h |   1 +
+ net/mac80211/ieee80211_i.h   |   1 +
+ net/mac80211/mesh.c          |   2 +
+ net/mac80211/mesh.h          |  37 ++++
+ net/mac80211/mesh_hwmp.c     |   9 +-
+ net/mac80211/mesh_pathtbl.c  | 397 +++++++++++++++++++++++++++++++++++++++++++
+ net/mac80211/rx.c            |   4 +
+ net/mac80211/tx.c            |  90 +++++++++-
+ 9 files changed, 537 insertions(+), 5 deletions(-)
+
+--- a/include/net/mac80211.h
++++ b/include/net/mac80211.h
+@@ -914,6 +914,7 @@ enum mac80211_tx_control_flags {
+ 	IEEE80211_TX_INTCFL_NEED_TXPROCESSING	= BIT(6),
+ 	IEEE80211_TX_CTRL_NO_SEQNO		= BIT(7),
+ 	IEEE80211_TX_CTRL_DONT_REORDER		= BIT(8),
++	IEEE80211_TX_CTRL_CHECK_FAST_MESH	= BIT(9),
+ };
+ 
+ /*
+--- a/net/mac80211/ieee80211_i.h
++++ b/net/mac80211/ieee80211_i.h
+@@ -749,6 +749,7 @@ struct ieee80211_if_mesh {
+ 	struct mesh_table *mpp_paths; /* Store paths for MPP&MAP */
+ 	int mesh_paths_generation;
+ 	int mpp_paths_generation;
++	struct mesh_hdr_cache *hdr_cache;
+ };
+ 
+ #ifdef CPTCFG_MAC80211_MESH
+--- a/net/mac80211/mesh.c
++++ b/net/mac80211/mesh.c
+@@ -789,6 +789,8 @@ static void ieee80211_mesh_housekeeping(
+ 	changed = mesh_accept_plinks_update(sdata);
+ 	ieee80211_mbss_info_change_notify(sdata, changed);
+ 
++	mesh_hdr_cache_manage(sdata);
++
+ 	mod_timer(&ifmsh->housekeeping_timer,
+ 		  round_jiffies(jiffies +
+ 				IEEE80211_MESH_HOUSEKEEPING_INTERVAL));
+--- a/net/mac80211/mesh.h
++++ b/net/mac80211/mesh.h
+@@ -147,6 +147,36 @@ struct mesh_table {
+ 	atomic_t entries;		/* Up to MAX_MESH_NEIGHBOURS */
+ };
+ 
++struct mesh_hdr_cache {
++	struct rhashtable rhead;
++	struct hlist_head walk_head;
++	spinlock_t walk_lock;
++	atomic_t size;
++};
++
++#define MESH_HDR_CACHE_SIZE		50
++#define MESH_HDR_CACHE_HIGH_THRESHOLD	((MESH_HDR_CACHE_SIZE * 2)/3)
++#define MESH_HDR_CACHE_TIMEOUT		8000 /* msecs */
++
++#define MESH_HDR_MAX_LEN	56	/* mac+mesh+rfc1042 hdr */
++
++struct mhdr_cache_entry {
++	u8 addr_key[ETH_ALEN];
++	u8 hdr[MESH_HDR_MAX_LEN];
++	u16 machdr_len;
++	u16 hdrlen;
++	struct ieee80211_key *key;
++	u8 pn_offs;
++	u8 band;
++	struct hlist_node walk_list;
++	struct rhash_head rhash;
++	struct mesh_path *mpath;
++	struct mesh_path *mppath;
++	unsigned long timestamp;
++	struct rcu_head rcu;
++	u32 path_change_count;
++};
++
+ /* Recent multicast cache */
+ /* RMC_BUCKETS must be a power of 2, maximum 256 */
+ #define RMC_BUCKETS		256
+@@ -327,6 +357,13 @@ bool mesh_action_is_path_sel(struct ieee
+ void mesh_bmiss_event(struct timer_list *t);
+ void mesh_nss_offld_path_update(struct mesh_path *mpath, bool is_mpath, u8 *old_next_hop_addr);
+ 
++struct mhdr_cache_entry *mesh_fill_cached_hdr(struct ieee80211_sub_if_data *sdata,
++					      struct sk_buff *skb);
++void mesh_cache_hdr(struct ieee80211_sub_if_data *sdata,
++		    struct sk_buff *skb, struct mesh_path *mpath);
++void mesh_hdr_cache_manage(struct ieee80211_sub_if_data *sdata);
++void mesh_hdr_cache_flush(struct mesh_path *mpath, bool is_mpp);
++void mesh_queue_preq(struct mesh_path *mpath, u8 flags);
+ #ifdef CPTCFG_MAC80211_MESH
+ static inline
+ u32 mesh_plink_inc_estab_count(struct ieee80211_sub_if_data *sdata)
+--- a/net/mac80211/mesh_hwmp.c
++++ b/net/mac80211/mesh_hwmp.c
+@@ -18,8 +18,6 @@
+ 
+ #define MAX_PREQ_QUEUE_LEN	64
+ 
+-static void mesh_queue_preq(struct mesh_path *, u8);
+-
+ static inline u32 u32_field_get(const u8 *preq_elem, int offset, bool ae)
+ {
+ 	if (ae)
+@@ -1060,7 +1058,7 @@ void mesh_rx_path_sel_frame(struct ieee8
+  * Locking: the function must be called from within a rcu read lock block.
+  *
+  */
+-static void mesh_queue_preq(struct mesh_path *mpath, u8 flags)
++void mesh_queue_preq(struct mesh_path *mpath, u8 flags)
+ {
+ 	struct ieee80211_sub_if_data *sdata = mpath->sdata;
+ 	struct ieee80211_if_mesh *ifmsh = &sdata->u.mesh;
+@@ -1330,6 +1328,7 @@ int mesh_nexthop_lookup(struct ieee80211
+ 	if (!mpath || !(mpath->flags & MESH_PATH_ACTIVE))
+ 		return -ENOENT;
+ 
++
+ 	if (time_after(jiffies,
+ 		       mpath->exp_time -
+ 		       msecs_to_jiffies(sdata->u.mesh.mshcfg.path_refresh_time)) &&
+@@ -1343,6 +1342,10 @@ int mesh_nexthop_lookup(struct ieee80211
+ 		memcpy(hdr->addr1, next_hop->sta.addr, ETH_ALEN);
+ 		memcpy(hdr->addr2, sdata->vif.addr, ETH_ALEN);
+ 		ieee80211_mps_set_frame_flags(sdata, next_hop, hdr);
++		/* Cache the whole header so as to use next time rather than resolving
++		 * and building it every time
++		 */
++		mesh_cache_hdr(sdata, skb, mpath);
+ 		return 0;
+ 	}
+ 
+--- a/net/mac80211/mesh_pathtbl.c
++++ b/net/mac80211/mesh_pathtbl.c
+@@ -15,6 +15,7 @@
+ #include "ieee80211_i.h"
+ #include "mesh.h"
+ #include "driver-ops.h"
++#include <linux/rhashtable.h>
+ 
+ static void mesh_path_free_rcu(struct mesh_table *tbl, struct mesh_path *mpath);
+ 
+@@ -33,6 +34,63 @@ static const struct rhashtable_params me
+ 	.hashfn = mesh_table_hash,
+ };
+ 
++static const struct rhashtable_params mesh_hdr_rht_params = {
++	.nelem_hint = 10,
++	.automatic_shrinking = true,
++	.key_len =  ETH_ALEN,
++	.key_offset = offsetof(struct mhdr_cache_entry, addr_key),
++	.head_offset = offsetof(struct mhdr_cache_entry, rhash),
++	.hashfn = mesh_table_hash,
++};
++
++static void mesh_hdr_cache_entry_free(void *ptr, void *tblptr)
++{
++	struct mhdr_cache_entry *mhdr = ptr;
++
++	kfree_rcu(mhdr, rcu);
++}
++
++static void mesh_hdr_cache_deinit(struct ieee80211_sub_if_data *sdata)
++{
++	struct mesh_hdr_cache *cache;
++
++	cache = sdata->u.mesh.hdr_cache;
++
++	if (!cache)
++		return;
++
++	rhashtable_free_and_destroy(&cache->rhead,
++				    mesh_hdr_cache_entry_free, NULL);
++
++	kfree(sdata->u.mesh.hdr_cache);
++	sdata->u.mesh.hdr_cache = NULL;
++}
++
++static void mesh_hdr_cache_init(struct ieee80211_sub_if_data *sdata)
++{
++	struct ieee80211_local *local = sdata->local;
++	struct mesh_hdr_cache *cache;
++
++	sdata->u.mesh.hdr_cache = NULL;
++
++	if (!ieee80211_hw_check(&local->hw, SUPPORT_FAST_XMIT))
++		return;
++
++	if (ieee80211_hw_check(&local->hw, SUPPORTS_NSS_OFFLOAD))
++		return;
++
++	cache = kmalloc(sizeof(struct mesh_hdr_cache), GFP_ATOMIC);
++
++	if (!cache)
++		return;
++
++	sdata->u.mesh.hdr_cache = cache;
++	rhashtable_init(&cache->rhead, &mesh_hdr_rht_params);
++	INIT_HLIST_HEAD(&cache->walk_head);
++	spin_lock_init(&cache->walk_lock);
++	atomic_set(&cache->size, 0);
++}
++
+ static inline bool mpath_expired(struct mesh_path *mpath)
+ {
+ 	return (mpath->flags & MESH_PATH_ACTIVE) &&
+@@ -460,6 +518,348 @@ struct mesh_path *mesh_path_new(struct i
+ 	return new_mpath;
+ }
+ 
++/**
++ * Replaces the Ethernet header with fully formed mac+mesh header
++ * which was stored for this DA:SA combination. Also necessary
++ * checks are done for checking freshness of the header
++ */
++struct mhdr_cache_entry *mesh_fill_cached_hdr(struct ieee80211_sub_if_data *sdata,
++					      struct sk_buff *skb)
++{
++	struct mesh_hdr_cache *cache;
++	struct mhdr_cache_entry *entry;
++	struct mesh_path *mpath, *mppath;
++	struct ieee80211s_hdr *meshhdr;
++	struct ieee80211_hdr *hdr;
++	struct sta_info *new_nhop;
++	struct ieee80211_key *key;
++	struct ethhdr *eth;
++	u8 sa[ETH_ALEN];
++
++	u8 tid;
++
++	cache = sdata->u.mesh.hdr_cache;
++
++	if (!cache)
++		return NULL;
++
++	entry = rhashtable_lookup(&cache->rhead, skb->data,
++				  mesh_hdr_rht_params);
++	if (!entry)
++		return NULL;
++
++	/* Avoid extra work in this path */
++	if (skb_headroom(skb) < (entry->hdrlen - ETH_HLEN + 2))
++		return NULL;
++
++
++	mpath = rcu_dereference(entry->mpath);
++	if (!mpath)
++		return NULL;
++
++	/* This check is with assumption that only 6addr frames are
++	 * supported currently for caching
++	 */
++	mppath = rcu_dereference(entry->mppath);
++	if (!mppath)
++		return NULL;
++
++	if (!(mpath->flags & MESH_PATH_ACTIVE))
++		return NULL;
++
++	if (mpath_expired(mpath))
++		return NULL;
++
++	/*
++	 * If the skb is shared we need to obtain our own copy.
++	 */
++	if (skb_shared(skb)) {
++		struct sk_buff *tmp_skb = skb;
++
++		skb = skb_clone(skb, GFP_ATOMIC);
++		kfree_skb(tmp_skb);
++
++		if (!skb)
++			return NULL;
++	}
++
++	/* In case there was a path refresh and update after we last used
++	 * update the next hop addr.
++	 */
++	spin_lock_bh(&mpath->state_lock);
++	if (entry->path_change_count != mpath->path_change_count) {
++		new_nhop = rcu_dereference(mpath->next_hop);
++		if (!new_nhop) {
++			spin_unlock_bh(&mpath->state_lock);
++			return NULL;
++		}
++		memcpy(&entry->hdr[4], new_nhop->sta.addr, ETH_ALEN);
++
++		/* update key. pn_offs will be same */
++		if (entry->key)	{
++			key = rcu_access_pointer(new_nhop->ptk[new_nhop->ptk_idx]);
++			if (!key)
++				key = rcu_access_pointer(sdata->default_unicast_key);
++			rcu_assign_pointer(entry->key, key);
++		}
++		entry->path_change_count = mpath->path_change_count;
++	}
++	spin_unlock_bh(&mpath->state_lock);
++
++	/* backup eth SA to copy as eaddr2/SA in the mesh header */
++	eth = (struct ethhdr *)skb->data;
++	ether_addr_copy(sa, eth->h_source);
++
++	/* Pull DA:SA */
++	skb_pull(skb, ETH_HLEN - 2);
++
++	memcpy(skb_push(skb, entry->hdrlen), entry->hdr, entry->hdrlen);
++
++	meshhdr = (struct ieee80211s_hdr *)(skb->data + entry->machdr_len);
++	hdr = (struct ieee80211_hdr *)skb->data;
++
++	/* Update mutables */
++	tid = skb->priority & IEEE80211_QOS_CTL_TAG1D_MASK;
++	*ieee80211_get_qos_ctl(hdr) = tid;
++
++	put_unaligned(cpu_to_le32(sdata->u.mesh.mesh_seqnum), &meshhdr->seqnum);
++	sdata->u.mesh.mesh_seqnum++;
++
++	memcpy(meshhdr->eaddr2, sa, ETH_ALEN);
++	meshhdr->ttl = sdata->u.mesh.mshcfg.dot11MeshTTL;
++
++	if (mpath->flags & (MESH_PATH_REQ_QUEUED | MESH_PATH_FIXED))
++		goto out;
++
++	/* Refresh the path, in case there is a change in nexthop after refresh
++	 * hdr will be updated on next lookup
++	 */
++	if (time_after(jiffies,
++		       mpath->exp_time -
++		       msecs_to_jiffies(sdata->u.mesh.mshcfg.path_refresh_time)) &&
++	    !(mpath->flags & MESH_PATH_RESOLVING) &&
++	    !(mpath->flags & MESH_PATH_FIXED)) {
++		mesh_queue_preq(mpath, PREQ_Q_F_START | PREQ_Q_F_REFRESH);
++	}
++
++out:
++	mppath->exp_time = jiffies;
++	entry->timestamp = jiffies;
++
++	return entry;
++}
++
++/**
++ * We store the created header here and save necessary states
++ * and data so as to use them directly when same DA:SA is used
++ * Before using this header we also check in mesh_fill_cached_hdr
++ * whether the path hasnt changed, etc before using
++ */
++void mesh_cache_hdr(struct ieee80211_sub_if_data *sdata,
++		    struct sk_buff *skb, struct mesh_path *mpath)
++{
++	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *) skb->data;
++	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
++	struct mesh_hdr_cache *cache;
++	struct mhdr_cache_entry *mhdr, *old_mhdr;
++	struct ieee80211s_hdr *meshhdr;
++	struct sta_info *next_hop;
++	struct ieee80211_key *key;
++	u8 band, pn_offs = 0, crypto_len = 0;
++	struct mesh_path *mppath;
++	u16 mshhdr_len;
++	int hdrlen;
++
++	cache = sdata->u.mesh.hdr_cache;
++
++	if (!cache)
++		return;
++
++	if (!(info->control.flags & IEEE80211_TX_CTRL_CHECK_FAST_MESH))
++		return;
++
++	band = info->band;
++
++	if (atomic_read(&cache->size) > MESH_HDR_CACHE_SIZE)
++		return;
++
++
++	hdrlen = ieee80211_hdrlen(hdr->frame_control);
++
++	meshhdr = (struct ieee80211s_hdr *)(skb->data + hdrlen);
++
++	/* TODO Currently supporting only 6addr hdr
++	 */
++	if (!(meshhdr->flags & MESH_FLAGS_AE_A5_A6))
++		return;
++
++	next_hop = rcu_dereference(mpath->next_hop);
++	if (!next_hop)
++		return;
++
++	/* This is required to keep the mppath alive */
++	mppath = mpp_path_lookup(sdata, meshhdr->eaddr1);
++
++	if (!mppath)
++		return;
++
++	/*TODO avoid if peers if they are PS peer and use regulat path */
++
++	pn_offs = 0;
++	key = rcu_access_pointer(next_hop->ptk[next_hop->ptk_idx]);
++	if (!key)
++		key = rcu_access_pointer(sdata->default_unicast_key);
++
++	if (key) {
++		bool gen_iv, iv_spc;
++
++		gen_iv = key->conf.flags & IEEE80211_KEY_FLAG_GENERATE_IV;
++		iv_spc = key->conf.flags & IEEE80211_KEY_FLAG_PUT_IV_SPACE;
++
++		if (!(key->flags & KEY_FLAG_UPLOADED_TO_HARDWARE))
++			return;;
++
++		if (key->flags & KEY_FLAG_TAINTED)
++			return;
++
++		switch (key->conf.cipher) {
++		case WLAN_CIPHER_SUITE_CCMP:
++		case WLAN_CIPHER_SUITE_CCMP_256:
++			if (gen_iv)
++				pn_offs = hdrlen;
++			if (gen_iv || iv_spc)
++				crypto_len = IEEE80211_CCMP_HDR_LEN;
++			break;
++		default:
++			/* Limiting supported ciphers for testing */
++			return;
++		}
++		hdr->frame_control |= cpu_to_le16(IEEE80211_FCTL_PROTECTED);
++	}
++
++	mhdr = kzalloc(sizeof(struct mhdr_cache_entry), GFP_KERNEL);
++	if (!mhdr)
++		return;
++
++	memcpy(mhdr->addr_key, meshhdr->eaddr1, ETH_ALEN);
++
++	mhdr->machdr_len = hdrlen + crypto_len;
++	mshhdr_len = ieee80211_get_mesh_hdrlen(meshhdr);
++	mhdr->hdrlen =  mhdr->machdr_len + mshhdr_len + sizeof(rfc1042_header);
++	rcu_assign_pointer(mhdr->mpath, mpath);
++	rcu_assign_pointer(mhdr->mppath, mppath);
++	rcu_assign_pointer(mhdr->key, key);
++	mhdr->timestamp = jiffies;
++	mhdr->band = band;
++	mhdr->pn_offs = pn_offs;
++
++	if (pn_offs) {
++		/* ignore the invalid data getting copied to pn location since it will
++		 * be overwritten dring tx
++		 */
++		memcpy(mhdr->hdr, skb->data, mhdr->machdr_len);
++
++		/* copy remaining hdr */
++		memcpy(mhdr->hdr + mhdr->machdr_len,
++		       skb->data + mhdr->machdr_len - crypto_len,
++		       mhdr->hdrlen - mhdr->machdr_len);
++	} else {
++		memcpy(mhdr->hdr, skb->data, mhdr->hdrlen);
++	}
++
++	if (key) {
++		hdr = (struct ieee80211_hdr *)mhdr->hdr;
++		hdr->frame_control |= cpu_to_le16(IEEE80211_FCTL_PROTECTED);
++	}
++
++	spin_lock_bh(&cache->walk_lock);
++	old_mhdr = rhashtable_lookup_get_insert_fast(&cache->rhead,
++						     &mhdr->rhash,
++						     mesh_hdr_rht_params);
++	if (old_mhdr) {
++		spin_unlock_bh(&cache->walk_lock);
++		kfree(mhdr);
++		return;
++	}
++
++	hlist_add_head(&mhdr->walk_list, &cache->walk_head);
++	spin_unlock_bh(&cache->walk_lock);
++
++	atomic_inc(&cache->size);
++}
++
++void mesh_hdr_cache_manage(struct ieee80211_sub_if_data *sdata)
++{
++	struct mesh_hdr_cache *cache;
++	struct mhdr_cache_entry *entry;
++	struct hlist_node *n;
++
++	cache = sdata->u.mesh.hdr_cache;
++
++	if (!cache)
++		return;
++
++	if (atomic_read(&cache->size) < MESH_HDR_CACHE_HIGH_THRESHOLD)
++		return;
++
++	spin_lock_bh(&cache->walk_lock);
++	hlist_for_each_entry_safe(entry, n, &cache->walk_head, walk_list) {
++		if (time_before(jiffies,
++			       entry->timestamp +
++			       msecs_to_jiffies(MESH_HDR_CACHE_TIMEOUT)))
++			continue;
++
++		hlist_del_rcu(&entry->walk_list);
++		rhashtable_remove_fast(&cache->rhead, &entry->rhash, mesh_hdr_rht_params);
++		kfree_rcu(entry, rcu);
++		atomic_dec(&cache->size);
++	}
++	spin_unlock_bh(&cache->walk_lock);
++}
++
++void mesh_hdr_cache_flush(struct mesh_path *mpath, bool is_mpp)
++{
++	struct ieee80211_sub_if_data *sdata = mpath->sdata;
++	struct mesh_hdr_cache *cache;
++	struct mhdr_cache_entry *entry;
++	struct hlist_node *n;
++	struct mesh_path *entry_mpath;
++
++	cache = sdata->u.mesh.hdr_cache;
++
++	if (!cache)
++		return;
++
++	spin_lock_bh(&cache->walk_lock);
++	/* Only one header per mpp address is expected in the header cache */
++	if (is_mpp) {
++		entry = rhashtable_lookup(&cache->rhead, mpath->dst, mesh_hdr_rht_params);
++		if (entry) {
++			hlist_del_rcu(&entry->walk_list);
++			rhashtable_remove_fast(&cache->rhead, &entry->rhash, mesh_hdr_rht_params);
++			kfree_rcu(entry, rcu);
++			atomic_dec(&cache->size);
++		}
++		spin_unlock_bh(&cache->walk_lock);
++		return;
++	}
++
++	hlist_for_each_entry_safe(entry, n, &cache->walk_head, walk_list) {
++		entry_mpath = rcu_dereference(entry->mpath);
++
++		if (!entry_mpath)
++			continue;
++
++		if (ether_addr_equal(entry_mpath->dst, mpath->dst)) {
++			hlist_del_rcu(&entry->walk_list);
++			rhashtable_remove_fast(&cache->rhead, &entry->rhash, mesh_hdr_rht_params);
++			kfree_rcu(entry, rcu);
++			atomic_dec(&cache->size);
++		}
++	}
++	spin_unlock_bh(&cache->walk_lock);
++}
++
+ struct mesh_path *__mesh_path_add(struct ieee80211_sub_if_data *sdata,
+ 				  const u8 *dst)
+ {
+@@ -487,6 +887,7 @@ struct mesh_path *__mesh_path_add(struct
+ 						  mesh_rht_params);
+ 	if (!mpath)
+ 		hlist_add_head(&new_mpath->walk_list, &tbl->walk_head);
++
+ 	spin_unlock_bh(&tbl->walk_lock);
+ 
+ 	if (mpath) {
+@@ -672,8 +1073,11 @@ static void __mesh_path_del(struct mesh_
+ 	if (next_hop)
+ 		ether_addr_copy(path.next_hop, next_hop->addr);
+ 
++	mesh_hdr_cache_flush(mpath, !is_mpath_tbl);
++
+ 	hlist_del_rcu(&mpath->walk_list);
+ 	rhashtable_remove_fast(&tbl->rhead, &mpath->rhash, mesh_rht_params);
++
+ 	mesh_path_free_rcu(tbl, mpath);
+ 
+ 	drv_config_mesh_offload_path(sdata->local, sdata,
+@@ -906,6 +1310,8 @@ void mesh_path_fix_nexthop(struct mesh_p
+ 	mpath->exp_time = 0;
+ 	mpath->flags = MESH_PATH_FIXED | MESH_PATH_SN_VALID;
+ 	mesh_path_activate(mpath);
++	if (!old_next_hop || !ether_addr_equal(old_next_hop->addr, next_hop->addr))
++		mpath->path_change_count++;
+ 	spin_unlock_bh(&mpath->state_lock);
+ 	ewma_mesh_fail_avg_init(&next_hop->mesh->fail_avg);
+ 	/* init it at a low value - 0 start is tricky */
+@@ -936,6 +1342,8 @@ int mesh_pathtbl_init(struct ieee80211_s
+ 	atomic_add(sizeof(struct mesh_table),
+ 		   &sdata->local->memory_stats.malloc_size);
+ 
++	mesh_hdr_cache_init(sdata);
++
+ 	sdata->u.mesh.mesh_paths = tbl_path;
+ 	sdata->u.mesh.mpp_paths = tbl_mpp;
+ 
+@@ -979,4 +1387,5 @@ void mesh_pathtbl_unregister(struct ieee
+ 		   &sdata->local->memory_stats.malloc_size);
+ 	mesh_table_free(sdata->u.mesh.mesh_paths);
+ 	mesh_table_free(sdata->u.mesh.mpp_paths);
++	mesh_hdr_cache_deinit(sdata);
+ }
+--- a/net/mac80211/rx.c
++++ b/net/mac80211/rx.c
+@@ -2952,6 +2952,10 @@ ieee80211_rx_h_mesh_fwding(struct ieee80
+ 				mesh_nss_offld_path_update(mppath, false, NULL);
+ 		}
+ 		rcu_read_unlock();
++
++		/* Flush any hdr, if external device moved to a new gate */
++		if (update)
++			mesh_hdr_cache_flush(mppath, true);
+ 	}
+ 
+ 	/* Frame has reached destination.  Don't forward */
+--- a/net/mac80211/tx.c
++++ b/net/mac80211/tx.c
+@@ -2655,18 +2655,24 @@ static struct sk_buff *ieee80211_build_h
+ 
+ 			hdrlen = ieee80211_fill_mesh_addresses(&hdr, &fc,
+ 					mesh_da, sdata->vif.addr);
+-			if (is_multicast_ether_addr(mesh_da))
++			if (is_multicast_ether_addr(mesh_da)) {
+ 				/* DA TA mSA AE:SA */
+ 				meshhdrlen = ieee80211_new_mesh_header(
+ 						sdata, &mesh_hdr,
+ 						skb->data + ETH_ALEN, NULL);
+-			else
++			} else {
+ 				/* RA TA mDA mSA AE:DA SA */
+ 				meshhdrlen = ieee80211_new_mesh_header(
+ 						sdata, &mesh_hdr, skb->data,
+ 						skb->data + ETH_ALEN);
+ 
++				/* cache unicast proxy headers */
++				if ((ethertype >= ETH_P_802_3_MIN))
++					ctrl_flags |= IEEE80211_TX_CTRL_CHECK_FAST_MESH;
++			}
++
+ 		}
++
+ 		chanctx_conf = rcu_dereference(sdata->vif.chanctx_conf);
+ 		if (!chanctx_conf) {
+ 			ret = -ENOTCONN;
+@@ -3456,6 +3462,81 @@ static void ieee80211_xmit_fast_finish(s
+ 	}
+ }
+ 
++static bool ieee80211_mesh_xmit_fast(struct ieee80211_sub_if_data *sdata,
++				     struct sk_buff *skb, u32 ctrl_flags)
++{
++	struct ieee80211_local *local = sdata->local;
++	struct ieee80211_if_mesh *ifmsh = &sdata->u.mesh;
++	struct ieee80211_tx_data tx;
++	struct ieee80211_tx_info *info;
++	struct mhdr_cache_entry *entry;
++	u16 ethertype = (skb->data[12] << 8) | skb->data[13];
++	struct ieee80211_key *key;
++	struct ieee80211_sta_info *sta;
++
++	if (ctrl_flags & IEEE80211_TX_CTRL_SKIP_MPATH_LOOKUP)
++		return false;
++
++	if (ifmsh->mshcfg.dot11MeshNolearn)
++		return false;
++
++	if (!ieee80211_hw_check(&local->hw, SUPPORT_FAST_XMIT))
++		return false;
++
++	if (ieee80211_hw_check(&local->hw, SUPPORTS_NSS_OFFLOAD))
++		return false;
++
++	if (sdata->noack_map)
++		return false;
++
++	if (is_multicast_ether_addr(skb->data))
++		return false;
++
++	if (ethertype < ETH_P_802_3_MIN)
++		return false;
++
++	if (skb->sk && skb_shinfo(skb)->tx_flags & SKBTX_WIFI_STATUS)
++		return false;
++
++	/* Fill cached header for this eth data */
++	entry = mesh_fill_cached_hdr(sdata, skb);
++
++	if (!entry)
++		return false;
++
++	info = IEEE80211_SKB_CB(skb);
++	memset(info, 0, sizeof(*info));
++	info->band = entry->band;
++	info->control.vif = &sdata->vif;
++	info->flags = IEEE80211_TX_CTL_FIRST_FRAGMENT |
++		      IEEE80211_TX_CTL_DONTFRAG;
++
++	info->control.flags = IEEE80211_TX_CTRL_FAST_XMIT;
++
++#ifdef CPTCFG_MAC80211_DEBUGFS
++	if (local->force_tx_status)
++		info->flags |= IEEE80211_TX_CTL_REQ_TX_STATUS;
++#endif
++
++	sta = entry->mpath->next_hop;
++	key = entry->key;
++
++	__skb_queue_head_init(&tx.skbs);
++
++	tx.flags = IEEE80211_TX_UNICAST;
++	tx.local = local;
++	tx.sdata = sdata;
++	tx.sta = sta;
++	tx.key = key;
++
++	ieee80211_xmit_fast_finish(sdata, sta, entry->pn_offs,
++				   key, skb);
++
++	__skb_queue_tail(&tx.skbs, skb);
++	ieee80211_tx_frags(local, &sdata->vif, sta, &tx.skbs, false);
++	return true;
++}
++
+ static bool ieee80211_xmit_fast(struct ieee80211_sub_if_data *sdata,
+ 				struct sta_info *sta,
+ 				struct ieee80211_fast_tx *fast_tx,
+@@ -3964,6 +4045,10 @@ void __ieee80211_subif_start_xmit(struct
+ 
+ 	rcu_read_lock();
+ 
++	if (ieee80211_vif_is_mesh(&sdata->vif) &&
++	    ieee80211_mesh_xmit_fast(sdata, skb, ctrl_flags))
++		goto out;
++
+ 	if (ieee80211_lookup_ra_sta(sdata, skb, &sta))
+ 		goto out_free;
+ 

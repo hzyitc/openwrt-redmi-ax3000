@@ -1,0 +1,55 @@
+From b035dc82ef26b922918bee8377663c603c9387dc Mon Sep 17 00:00:00 2001
+From: Aditya Kumar Singh <quic_adisi@quicinc.com>
+Date: Thu, 25 Nov 2021 15:41:36 +0530
+Subject: [PATCH] mac80211: fix 6GHz AP-STA concurrency issue
+
+Currently, for 6 GHz band, 9 different channel pools are maintained
+based on the various 6G regulatory power mode a device can be
+configured in. Due to this, chandef chan pointer will not be same
+for AP and STA. During, AP-STA concurrency, chandef compatibility is
+matched and for 6 GHz it fails which ultimately leads to nl80211_start_ap
+returning EBUSY.
+
+This patch adds a check to not perform chandef compatibility check for
+6 GHz band.
+
+Signed-off-by: Aditya Kumar Singh <quic_adisi@quicinc.com>
+---
+ net/mac80211/util.c | 21 +++++++++++++++++----
+ 1 file changed, 17 insertions(+), 4 deletions(-)
+
+diff --git a/net/mac80211/util.c b/net/mac80211/util.c
+index 08e0d64..a47d148 100644
+--- a/net/mac80211/util.c
++++ b/net/mac80211/util.c
+@@ -4477,10 +4477,23 @@ int ieee80211_check_combinations(struct ieee80211_sub_if_data *sdata,
+ 			params.num_different_channels++;
+ 			continue;
+ 		}
+-		if (chandef && chanmode == IEEE80211_CHANCTX_SHARED &&
+-		    cfg80211_chandef_compatible(chandef,
+-						&ctx->conf.def))
+-			continue;
++		if (chandef && chanmode == IEEE80211_CHANCTX_SHARED) {
++			/* 6 GHz chandefs could be different for different
++			 * interfaces beacuse of operating power modes.
++			 * Hence, we skip the chandef compatibility check.
++			 */
++			enum nl80211_band chan_band = chandef->chan->band;
++			bool is_6ghz_band = chan_band == NL80211_BAND_6GHZ
++							 ? true : false;
++
++			if (is_6ghz_band)
++				continue;
++
++			if (!is_6ghz_band &&
++			    cfg80211_chandef_compatible(chandef,
++							&ctx->conf.def))
++				continue;
++		}
+ 		params.num_different_channels++;
+ 	}
+ 
+-- 
+2.7.4
+

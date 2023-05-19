@@ -1,0 +1,219 @@
+From caef627557641e38d7342a12e96b35de89caa252 Mon Sep 17 00:00:00 2001
+From: Rameshkumar Sundaram <ramess@codeaurora.org>
+Date: Tue, 3 Aug 2021 13:27:50 +0530
+Subject: [PATCH] ath11k: add debug code to dump peer assoc params
+
+In some random scenarios q6 crash is observed due to incompatible
+phymode and peer he/vht flags in WMI_PEER_ASSOC_CMDID command,
+FW dump analysis in above scenario showed below logs,
+peer_flags = 0x0A03B406, <-- WMI_PEER_HE = 0x00000400 | WMI_PEER_40MHZ = 0x00002000
+whereas,
+phymode = 10 <--MODE_11AC_VHT80 = 10
+Here phymode is VHT80 and peer_flags has HE Set which is causing the crash.
+But in ath11k host peer_flags and phymode will only be set based on
+sta's has_he flag and he mcs mask hence couldn't predict exact path
+where above scenario can happen.
+Adding some debug code to dump peer assoc params and stack-trace
+when phymode & peer flags don't match in host during association.
+
+Signed-off-by: Rameshkumar Sundaram <ramess@codeaurora.org>
+---
+ drivers/net/wireless/ath/ath11k/mac.c | 57 ++++++++++++++++++++++++++++-------
+ drivers/net/wireless/ath/ath11k/wmi.c | 28 +++++++++--------
+ drivers/net/wireless/ath/ath11k/wmi.h |  2 +-
+ 3 files changed, 62 insertions(+), 25 deletions(-)
+
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -2634,12 +2634,18 @@ static void ath11k_peer_assoc_h_phymode(
+ 	WARN_ON(phymode == MODE_UNKNOWN);
+ }
+ 
+-static void ath11k_peer_assoc_prepare(struct ath11k *ar,
++static bool ath11k_peer_assoc_prepare(struct ath11k *ar,
+ 				      struct ieee80211_vif *vif,
+ 				      struct ieee80211_sta *sta,
+ 				      struct peer_assoc_params *arg,
+ 				      bool reassoc)
+ {
++	struct ath11k_vif *arvif = (void *)vif->drv_priv;
++	struct cfg80211_chan_def def;
++	enum nl80211_band band;
++	struct cfg80211_bitrate_mask *vif_mask;
++	struct ieee80211_he_cap_elem *he_cap;
++
+ 	lockdep_assert_held(&ar->conf_mutex);
+ 
+ 	memset(arg, 0, sizeof(*arg));
+@@ -2658,7 +2664,35 @@ static void ath11k_peer_assoc_prepare(st
+ 	ath11k_peer_assoc_h_qos(ar, vif, sta, arg);
+ 	ath11k_peer_assoc_h_smps(sta, arg);
+ 
++	if (arg->he_flag && (arg->peer_phymode < MODE_11AX_HE20)) {
++
++		if (WARN_ON(ath11k_mac_vif_chan(vif, &def)))
++			return false;
++
++	        band = def.chan->band;
++		ath11k_warn(ar->ab, "Invalid phymode - peer flag combination\n"
++			    "band = %d phymode = 0x%x reassoc %d Flags he %d vht %d ht %d bw40 %d bw80 %d bw160 %d",
++			     band, arg->peer_phymode, reassoc, arg->he_flag, arg->vht_flag, arg->ht_flag,
++			     arg->bw_40, arg->bw_80, arg->bw_160);
++
++		ath11k_warn(ar->ab, "STA(%pM) Capabilities:\nhe %d vht %d ht %d bw %d",
++			    sta->addr, sta->he_cap.has_he, sta->vht_cap.vht_supported,
++			    sta->ht_cap.ht_supported, sta->bandwidth);
++		ath11k_warn(ar->ab, "ht cap = 0x%x vht cap = 0x%x", sta->ht_cap.cap, sta->vht_cap.cap);
++		he_cap = &sta->he_cap.he_cap_elem;
++		print_hex_dump(KERN_ERR, "he_cap: ", DUMP_PREFIX_ADDRESS, 16, 1,
++			       he_cap, sizeof(struct ieee80211_he_cap_elem), false);
++
++		vif_mask = &arvif->bitrate_mask;
++		ath11k_warn(ar->ab, "arvif bit rate masked: he %d vht %d ht %d",
++			    ath11k_peer_assoc_h_he_masked(vif_mask->control[band].he_mcs),
++			    ath11k_peer_assoc_h_he_masked(vif_mask->control[band].vht_mcs),
++			    ath11k_peer_assoc_h_he_masked(vif_mask->control[band].ht_mcs));
++		WARN_ON_ONCE(1);
++		return true;
++	}
+ 	/* TODO: amsdu_disable req? */
++	return false;
+ }
+ 
+ static int ath11k_setup_peer_smps(struct ath11k *ar, struct ath11k_vif *arvif,
+@@ -2828,6 +2862,7 @@ static void ath11k_bss_assoc(struct ieee
+ 	struct ieee80211_sta_he_cap  he_cap;
+ 	struct ath11k_peer *peer;
+ 	int ret;
++	bool debug;
+ 
+ 	lockdep_assert_held(&ar->conf_mutex);
+ 
+@@ -2846,12 +2881,12 @@ static void ath11k_bss_assoc(struct ieee
+ 	/* he_cap here is updated at assoc success for sta mode only */
+ 	he_cap  = ap_sta->he_cap;
+ 
+-	ath11k_peer_assoc_prepare(ar, vif, ap_sta, &peer_arg, false);
++	debug = ath11k_peer_assoc_prepare(ar, vif, ap_sta, &peer_arg, false);
+ 
+ 	rcu_read_unlock();
+ 
+ 	peer_arg.is_assoc = true;
+-	ret = ath11k_wmi_send_peer_assoc_cmd(ar, &peer_arg);
++	ret = ath11k_wmi_send_peer_assoc_cmd(ar, &peer_arg, debug);
+ 	if (ret) {
+ 		ath11k_warn(ar->ab, "failed to run peer assoc for %pM vdev %i: %d\n",
+ 			    bss_conf->bssid, arvif->vdev_id, ret);
+@@ -4499,7 +4534,7 @@ static int ath11k_station_assoc(struct a
+ 	enum nl80211_band band;
+ 	struct cfg80211_bitrate_mask *mask;
+ 	u8 num_vht_rates, num_he_rates, num_ht_rates;
+-	bool peer_dbg_info;
++	bool peer_dbg_info, debug;
+ 
+ 	lockdep_assert_held(&ar->conf_mutex);
+ 
+@@ -4514,10 +4549,10 @@ static int ath11k_station_assoc(struct a
+ 	band = def.chan->band;
+ 	mask = &arvif->bitrate_mask;
+ 
+-	ath11k_peer_assoc_prepare(ar, vif, sta, &peer_arg, reassoc);
++	debug = ath11k_peer_assoc_prepare(ar, vif, sta, &peer_arg, reassoc);
+ 
+ 	peer_arg.is_assoc = true;
+-	ret = ath11k_wmi_send_peer_assoc_cmd(ar, &peer_arg);
++	ret = ath11k_wmi_send_peer_assoc_cmd(ar, &peer_arg, debug);
+ 	if (ret) {
+ 		ath11k_warn(ar->ab, "failed to run peer assoc for STA %pM vdev %i: %d\n",
+ 			    sta->addr, arvif->vdev_id, ret);
+@@ -4635,7 +4670,7 @@ static void ath11k_sta_rc_update_wk(stru
+ 	int err, num_ht_rates, num_vht_rates,  num_he_rates;
+ 	const struct cfg80211_bitrate_mask *mask;
+ 	struct peer_assoc_params peer_arg;
+-	bool peer_dbg_info;
++	bool peer_dbg_info, debug;
+ 
+ 	arsta = container_of(wk, struct ath11k_sta, update_wk);
+ 	sta = container_of((void *)arsta, struct ieee80211_sta, drv_priv);
+@@ -4680,10 +4715,10 @@ static void ath11k_sta_rc_update_wk(stru
+ 		 * avoid the target assert due to mismatch between the peer phymode
+ 		 * and peer bandwidth.
+ 		 */
+-		ath11k_peer_assoc_prepare(ar, arvif->vif, sta, &peer_arg, true);
++		debug = ath11k_peer_assoc_prepare(ar, arvif->vif, sta, &peer_arg, true);
+ 
+ 		peer_arg.is_assoc = false;
+-		err = ath11k_wmi_send_peer_assoc_cmd(ar, &peer_arg);
++		err = ath11k_wmi_send_peer_assoc_cmd(ar, &peer_arg, debug);
+ 		if (err)
+ 			ath11k_warn(ar->ab, "failed to run peer assoc for STA %pM vdev %i: %d\n",
+ 					sta->addr, arvif->vdev_id, err);
+@@ -4774,11 +4809,11 @@ static void ath11k_sta_rc_update_wk(stru
+ 					    "failed to disable peer fixed rate for STA %pM ret %d\n",
+ 					    sta->addr, err);
+ 
+-			ath11k_peer_assoc_prepare(ar, arvif->vif, sta,
++			debug = ath11k_peer_assoc_prepare(ar, arvif->vif, sta,
+ 						  &peer_arg, true);
+ 
+ 			peer_arg.is_assoc = false;
+-			err = ath11k_wmi_send_peer_assoc_cmd(ar, &peer_arg);
++			err = ath11k_wmi_send_peer_assoc_cmd(ar, &peer_arg, debug);
+ 			if (err)
+ 				ath11k_warn(ar->ab, "failed to run peer assoc for STA %pM vdev %i: %d\n",
+ 					    sta->addr, arvif->vdev_id, err);
+--- a/drivers/net/wireless/ath/ath11k/wmi.c
++++ b/drivers/net/wireless/ath/ath11k/wmi.c
+@@ -2105,7 +2105,7 @@ ath11k_wmi_copy_peer_flags(struct wmi_pe
+ }
+ 
+ int ath11k_wmi_send_peer_assoc_cmd(struct ath11k *ar,
+-				   struct peer_assoc_params *param)
++				   struct peer_assoc_params *param, bool debug)
+ {
+ 	struct ath11k_pdev_wmi *wmi = ar->wmi;
+ 	struct wmi_peer_assoc_complete_cmd *cmd;
+@@ -2249,18 +2249,20 @@ int ath11k_wmi_send_peer_assoc_cmd(struc
+ 		dev_kfree_skb(skb);
+ 	}
+ 
+-	ath11k_dbg(ar->ab, ATH11K_DBG_WMI,
+-		   "wmi peer assoc vdev id %d assoc id %d peer mac %pM peer_flags %x rate_caps %x peer_caps %x listen_intval %d ht_caps %x max_mpdu %d nss %d phymode %d peer_mpdu_density %d vht_caps %x he cap_info %x he ops %x he cap_info_ext %x he phy %x %x %x peer_bw_rxnss_override %x\n",
+-		   cmd->vdev_id, cmd->peer_associd, param->peer_mac,
+-		   cmd->peer_flags, cmd->peer_rate_caps, cmd->peer_caps,
+-		   cmd->peer_listen_intval, cmd->peer_ht_caps,
+-		   cmd->peer_max_mpdu, cmd->peer_nss, cmd->peer_phymode,
+-		   cmd->peer_mpdu_density,
+-		   cmd->peer_vht_caps, cmd->peer_he_cap_info,
+-		   cmd->peer_he_ops, cmd->peer_he_cap_info_ext,
+-		   cmd->peer_he_cap_phy[0], cmd->peer_he_cap_phy[1],
+-		   cmd->peer_he_cap_phy[2],
+-		   cmd->peer_bw_rxnss_override);
++	if(debug || (ath11k_debug_mask & ATH11K_DBG_WMI)) {
++		ath11k_warn(ar->ab,
++			   "wmi peer assoc vdev id %d assoc id %d peer mac %pM peer_flags %x rate_caps %x\n peer_caps %x listen_intval %d ht_caps %x max_mpdu %d \nnss %d phymode %d peer_mpdu_density %d vht_caps %x he cap_info %x \nhe ops %x he cap_info_ext %x he phy %x %x %x \npeer_bw_rxnss_override %x\n",
++			   cmd->vdev_id, cmd->peer_associd, param->peer_mac,
++			   cmd->peer_flags, cmd->peer_rate_caps, cmd->peer_caps,
++			   cmd->peer_listen_intval, cmd->peer_ht_caps,
++			   cmd->peer_max_mpdu, cmd->peer_nss, cmd->peer_phymode,
++			   cmd->peer_mpdu_density,
++			   cmd->peer_vht_caps, cmd->peer_he_cap_info,
++			   cmd->peer_he_ops, cmd->peer_he_cap_info_ext,
++			   cmd->peer_he_cap_phy[0], cmd->peer_he_cap_phy[1],
++			   cmd->peer_he_cap_phy[2],
++			   cmd->peer_bw_rxnss_override);
++	}
+ 
+ 	return ret;
+ }
+--- a/drivers/net/wireless/ath/ath11k/wmi.h
++++ b/drivers/net/wireless/ath/ath11k/wmi.h
+@@ -6697,7 +6697,7 @@ int ath11k_wmi_pdev_suspend(struct ath11
+ int ath11k_wmi_pdev_resume(struct ath11k *ar, u32 pdev_id);
+ 
+ int ath11k_wmi_send_peer_assoc_cmd(struct ath11k *ar,
+-				   struct peer_assoc_params *param);
++				   struct peer_assoc_params *param, bool debug);
+ int ath11k_wmi_vdev_install_key(struct ath11k *ar,
+ 				struct wmi_vdev_install_key_arg *arg);
+ int ath11k_wmi_pdev_bss_chan_info_request(struct ath11k *ar,

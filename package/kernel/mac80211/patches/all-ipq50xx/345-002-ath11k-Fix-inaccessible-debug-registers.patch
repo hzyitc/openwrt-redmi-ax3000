@@ -1,0 +1,47 @@
+commit 0f07a505fdf49e4372363674bacd1c0050386833
+Author: Anilkumar Kolli <quic_akolli@quicinc.com>
+Date:   Thu Jan 27 11:39:33 2022 +0530
+
+    ath11k: Fix inaccessible debug registers
+    
+    Current code clears debug registers after SOC global reset performed
+    in ath11k_pci_sw_reset. However at that time those registers are
+    not accessible due to reset, thus they are actually not cleared at all.
+    For WCN6855, it may cause target fail to initialize. This issue can be
+    fixed by moving clear action ahead.
+    
+    In addition, on some specific platforms, need to add delay to wait
+    those registers to become accessible.
+    
+    Tested-on: WCN6855 hw2.0 PCI WLAN.HSP.1.1-01720.1-QCAHSPSWPL_V1_V2_SILICONZ_LITE-1
+    
+    Signed-off-by: Baochen Qiang <bqiang@codeaurora.org>
+    Signed-off-by: Jouni Malinen <jouni@codeaurora.org>
+    Signed-off-by: Kalle Valo <kvalo@codeaurora.org>
+    Link: https://lore.kernel.org/r/20210913180246.193388-3-jouni@codeaurora.org
+    Signed-off-by: Anilkumar Kolli <quic_akolli@quicinc.com>
+
+diff --git a/drivers/net/wireless/ath/ath11k/pci.c b/drivers/net/wireless/ath/ath11k/pci.c
+index 0a54059e7ed7..3b0cda991e2f 100644
+--- a/drivers/net/wireless/ath/ath11k/pci.c
++++ b/drivers/net/wireless/ath/ath11k/pci.c
+@@ -396,6 +396,8 @@ static void ath11k_pci_force_wake(struct ath11k_base *ab)
+ 
+ static void ath11k_pci_sw_reset(struct ath11k_base *ab, bool power_on)
+ {
++	mdelay(100);
++
+ 	if (power_on) {
+ 		ath11k_pci_enable_ltssm(ab);
+ 		ath11k_pci_clear_all_intrs(ab);
+@@ -404,9 +406,9 @@ static void ath11k_pci_sw_reset(struct ath11k_base *ab, bool power_on)
+ 	}
+ 
+ 	ath11k_mhi_clear_vector(ab);
++	ath11k_pci_clear_dbg_registers(ab);
+ 	ath11k_pci_soc_global_reset(ab);
+ 	ath11k_mhi_set_mhictrl_reset(ab);
+-	ath11k_pci_clear_dbg_registers(ab);
+ }
+ 
+ #define MAX_MSI_IRQS            32

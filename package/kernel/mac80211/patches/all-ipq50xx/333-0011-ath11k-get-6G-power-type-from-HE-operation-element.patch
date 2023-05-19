@@ -1,0 +1,49 @@
+From 5875c4669b682bf202928ce0c7745e8141d02f2b Mon Sep 17 00:00:00 2001
+From: Wen Gong <quic_wgong@quicinc.com>
+Date: Wed, 20 Oct 2021 14:34:34 +0530
+Subject: [PATCH] ath11k: get 6G power type from HE operation element
+
+When 6G AP or STA is assigned a chan ctx, it needs to
+extract the power type from HE operation element. This
+patch is to extract the power type. If unset power type
+is present, by default IEEE80211_REG_LPI_AP power mode
+will be used.
+
+Signed-off-by: Wen Gong <quic_wgong@quicinc.com>
+Signed-off-by: Aditya Kumar Singh <quic_adisi@quicinc.com>
+---
+ drivers/net/wireless/ath/ath11k/mac.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/drivers/net/wireless/ath/ath11k/mac.c b/drivers/net/wireless/ath/ath11k/mac.c
+index ea34796..3ef2615 100644
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -7815,6 +7815,7 @@ ath11k_mac_op_assign_vif_chanctx(struct ieee80211_hw *hw,
+ 	struct ath11k_vif *arvif = (void *)vif->drv_priv;
+ 	int ret;
+ 	struct peer_create_params param;
++	enum ieee80211_ap_reg_power power_type;
+ 
+ 	mutex_lock(&ar->conf_mutex);
+ 
+@@ -7822,6 +7823,16 @@ ath11k_mac_op_assign_vif_chanctx(struct ieee80211_hw *hw,
+ 		   "mac chanctx assign ptr %pK vdev_id %i\n",
+ 		   ctx, arvif->vdev_id);
+ 
++	if (ar->supports_6ghz && ctx->def.chan->band == NL80211_BAND_6GHZ &&
++	    (arvif->vdev_type == WMI_VDEV_TYPE_STA ||
++	     arvif->vdev_type == WMI_VDEV_TYPE_AP)) {
++		power_type = vif->bss_conf.power_type;
++		ath11k_dbg(ab, ATH11K_DBG_MAC, "mac chanctx power type %d\n",
++			   power_type);
++		if (power_type == IEEE80211_REG_UNSET_AP)
++			power_type = IEEE80211_REG_LPI_AP;
++	}
++
+ 	/* for QCA6390 bss peer must be created before vdev_start */
+ 	if (ab->hw_params.vdev_start_delay &&
+ 	    arvif->vdev_type != WMI_VDEV_TYPE_AP &&
+-- 
+2.7.4
+

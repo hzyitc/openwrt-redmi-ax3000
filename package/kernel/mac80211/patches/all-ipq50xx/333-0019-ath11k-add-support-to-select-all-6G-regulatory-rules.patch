@@ -1,0 +1,300 @@
+From d105e8cb943b33304adc54593e5fe10f8e7f48dd Mon Sep 17 00:00:00 2001
+From: Aditya Kumar Singh <quic_adisi@quicinc.com>
+Date: Wed, 20 Oct 2021 16:26:57 +0530
+Subject: [PATCH] ath11k: add support to select all 6G regulatory rules
+
+Currently, ath11k was only updating one type of 6G
+regulatory rule based on wmi_vdev_type. However, during
+AP + STA concurrency, it can not maintain two different
+rules in one single reg rule space. Hence, this change is to
+update and store all possible 6G reg rules in the regulatory
+domain.
+
+Subsequent patch will use one of this reg rules as per
+its configured power mode and can update its rules accordingly.
+Even during concurrency, two rules can be fetched and updated.
+
+Signed-off-by: Aditya Kumar Singh <quic_adisi@quicinc.com>
+---
+ drivers/net/wireless/ath/ath11k/reg.c | 121 +++++++++++++++++++++++-----------
+ drivers/net/wireless/ath/ath11k/reg.h |   1 -
+ drivers/net/wireless/ath/ath11k/wmi.c |   2 +-
+ 3 files changed, 84 insertions(+), 40 deletions(-)
+
+--- a/drivers/net/wireless/ath/ath11k/reg.c
++++ b/drivers/net/wireless/ath/ath11k/reg.c
+@@ -538,52 +538,72 @@ ath11k_ieee80211_ap_pwr_type_convert(enu
+ 	}
+ }
+ 
++static struct cur_reg_rule
++*ath11k_get_active_6g_reg_rule(struct cur_regulatory_info *reg_info,
++			       u32 *max_bw_6g, int *max_elements)
++{
++	struct cur_reg_rule *reg_rule = NULL;
++	u8 i = 0, j = 0;
++
++	for (i = 0; i < WMI_REG_CURRENT_MAX_AP_TYPE; i++) {
++		if (reg_info->num_6g_reg_rules_ap[i]) {
++			*max_elements = reg_info->num_6g_reg_rules_ap[i];
++			reg_rule = reg_info->reg_rules_6g_ap_ptr[i];
++			*max_bw_6g = reg_info->max_bw_6g_ap[i];
++			reg_info->num_6g_reg_rules_ap[i] = 0;
++			return reg_rule;
++		}
++	}
++
++	for (i = 0; i < WMI_REG_MAX_CLIENT_TYPE; i++) {
++		for (j = 0; j < WMI_REG_CURRENT_MAX_AP_TYPE; j++) {
++			if (reg_info->num_6g_reg_rules_client[j][i]) {
++				*max_elements = reg_info->num_6g_reg_rules_client
++									   [j][i];
++				reg_rule = reg_info->reg_rules_6g_client_ptr
++								      [j][i];
++				*max_bw_6g = reg_info->max_bw_6g_client[j][i];
++				reg_info->num_6g_reg_rules_client[j][i] = 0;
++				return reg_rule;
++			}
++		}
++	}
++
++	return reg_rule;
++}
++
+ struct ieee80211_regdomain *
+ ath11k_reg_build_regd(struct ath11k_base *ab,
+ 		      struct cur_regulatory_info *reg_info, bool intersect,
+-		      enum wmi_vdev_type vdev_type,
+ 		      enum ieee80211_ap_reg_power power_type)
+ {
+ 	struct ieee80211_regdomain *tmp_regd, *default_regd, *new_regd = NULL;
+ 	struct cur_reg_rule *reg_rule, *reg_rule_6g;
+-	u8 i = 0, j = 0, k = 0;
++	u8 i = 0, j = 0, k = 0, max_elements = 0;
+ 	u8 num_rules;
+ 	u16 max_bw;
+-	u32 flags, reg_6g_number, max_bw_6g;
++	u32 flags, reg_6g_number = 0, max_bw_6g = 0;
+ 	char alpha2[3];
++	bool reg_6g_itr_set = false;
+ 
+ 	num_rules = reg_info->num_5g_reg_rules + reg_info->num_2g_reg_rules;
+ 
+-	/* FIXME: Currently taking reg rules for 6G only from Indoor AP mode list.
+-	 * This can be updated to choose the combination dynamically based on AP
+-	 * type and client type, after complete 6G regulatory support is added.
++	/* FIXME: Currently updating all 9 possible regulatory rules for 6G.
++	 * For space optimization, logic can be enhanced to store reg rules
++	 * dynamically from power, AP and STA mode combination.
+ 	 */
+ 	if (reg_info->is_ext_reg_event) {
+-		if (vdev_type == WMI_VDEV_TYPE_STA) {
+-			enum wmi_reg_6g_ap_type ap_type;
+-
+-			ap_type = ath11k_ieee80211_ap_pwr_type_convert(power_type);
+-
+-			if (ap_type == WMI_REG_MAX_AP_TYPE)
+-				ap_type = WMI_REG_INDOOR_AP;
+-			reg_6g_number = reg_info->num_6g_reg_rules_client
+-					[ap_type][WMI_REG_DEFAULT_CLIENT];
+-			if (reg_6g_number == 0) {
+-				ap_type = WMI_REG_INDOOR_AP;
+-				reg_6g_number = reg_info->num_6g_reg_rules_client
+-						[ap_type][WMI_REG_DEFAULT_CLIENT];
+-			}
+-			reg_rule_6g = reg_info->reg_rules_6g_client_ptr
+-					[ap_type][WMI_REG_DEFAULT_CLIENT];
+-			max_bw_6g = reg_info->max_bw_6g_client
+-					[ap_type][WMI_REG_DEFAULT_CLIENT];
+-		} else {
+-			reg_6g_number = reg_info->num_6g_reg_rules_ap[WMI_REG_INDOOR_AP];
+-			reg_rule_6g = reg_info->reg_rules_6g_ap_ptr[WMI_REG_INDOOR_AP];
+-			max_bw_6g = reg_info->max_bw_6g_ap[WMI_REG_INDOOR_AP];
++		/* All 6G APs - (LP, SP, VLP) */
++		for (i = 0; i < WMI_REG_CURRENT_MAX_AP_TYPE; i++)
++			reg_6g_number += reg_info->num_6g_reg_rules_ap[i];
++		/* All 6G STAs - (LP_DEF, LP_SUB, SP_DEF, SP_SUB, VLP_DEF, VLP_SUB) */
++		for (i = 0; i < WMI_REG_MAX_CLIENT_TYPE; i++) {
++			for (j = 0; j < WMI_REG_CURRENT_MAX_AP_TYPE; j++)
++				reg_6g_number += reg_info->num_6g_reg_rules_client
++									    [j][i];
+ 		}
+-		num_rules += reg_6g_number;
+ 	}
++	num_rules += reg_6g_number;
+ 
+ 	if (!num_rules)
+ 		goto ret;
+@@ -610,7 +630,7 @@ ath11k_reg_build_regd(struct ath11k_base
+ 	/* Update reg_rules[] below. Firmware is expected to
+ 	 * send these rules in order(2G rules first and then 5G)
+ 	 */
+-	for (; i < num_rules; i++) {
++	for (i = 0, j = 0; i < num_rules; i++) {
+ 		if (reg_info->num_2g_reg_rules &&
+ 		    (i < reg_info->num_2g_reg_rules)) {
+ 			reg_rule = reg_info->reg_rules_2g_ptr + i;
+@@ -637,14 +657,39 @@ ath11k_reg_build_regd(struct ath11k_base
+ 			else if (reg_rule->start_freq >= ATH11K_MIN_6G_FREQ)
+ 				ath11k_copy_reg_rule(&ab->reg_rule_6g, reg_rule);
+ 
+-		} else if (reg_info->is_ext_reg_event && reg_6g_number &&
+-			(k < reg_6g_number)) {
+-			reg_rule = reg_rule_6g + k++;
+-			max_bw = min_t(u16, reg_rule->max_bw, max_bw_6g);
+-			flags = NL80211_RRF_AUTO_BW;
+-			if (reg_rule->psd_flag)
+-				flags |= NL80211_RRF_PSD;
+-			ath11k_copy_reg_rule(&ab->reg_rule_6g, reg_rule);
++		} else if (reg_info->is_ext_reg_event && reg_6g_number) {
++			if (!reg_6g_itr_set) {
++				reg_rule_6g = ath11k_get_active_6g_reg_rule(reg_info,
++							  &max_bw_6g, &max_elements);
++
++				if (!reg_rule_6g) {
++					ath11k_warn(ab,
++						"\nFetching a valid reg_rule_6g_ptr failed."
++						"This shouldn't happen normally. Be carefull with"
++						"the regulatory domain settings\n");
++					break;
++				}
++				reg_6g_itr_set = true;
++			}
++			if (reg_6g_itr_set && k < max_elements) {
++				reg_rule = reg_rule_6g + k++;
++				max_bw = min_t(u16, reg_rule->max_bw, max_bw_6g);
++				flags = NL80211_RRF_AUTO_BW;
++
++				if (reg_rule->psd_flag)
++					flags |= NL80211_RRF_PSD;
++
++				ath11k_copy_reg_rule(&ab->reg_rule_6g, reg_rule);
++			}
++
++			if (reg_6g_itr_set && k >= max_elements) {
++				reg_6g_itr_set = false;
++				reg_rule_6g = NULL;
++				max_bw_6g = 0;
++				max_elements = 0;
++				k = 0;
++			}
++			reg_6g_number--;
+ 		} else {
+ 			break;
+ 		}
+--- a/drivers/net/wireless/ath/ath11k/reg.h
++++ b/drivers/net/wireless/ath/ath11k/reg.h
+@@ -31,7 +31,6 @@ void ath11k_regd_update_work(struct work
+ struct ieee80211_regdomain *
+ ath11k_reg_build_regd(struct ath11k_base *ab,
+ 		      struct cur_regulatory_info *reg_info, bool intersect,
+-		      enum wmi_vdev_type vdev_type,
+ 		      enum ieee80211_ap_reg_power power_type);
+ enum wmi_reg_6g_ap_type
+ ath11k_ieee80211_ap_pwr_type_convert(enum ieee80211_ap_reg_power power_type);
+--- a/drivers/net/wireless/ath/ath11k/wmi.c
++++ b/drivers/net/wireless/ath/ath11k/wmi.c
+@@ -5750,6 +5750,27 @@ static struct cur_reg_rule
+ 	return reg_rule_ptr;
+ }
+ 
++static u8
++ath11k_invalid_5g_reg_ext_rules_from_wmi(u32 num_reg_rules,
++					 struct wmi_regulatory_ext_rule_struct *wmi_reg_rule)
++{
++	u8 num_invalid_5g_rules = 0;
++	u32 count, start_freq, end_freq;
++
++	for (count = 0; count < num_reg_rules; count++) {
++		start_freq = FIELD_GET(REG_RULE_START_FREQ,
++				       wmi_reg_rule[count].freq_info);
++		end_freq = FIELD_GET(REG_RULE_END_FREQ,
++				     wmi_reg_rule[count].freq_info);
++
++		if (start_freq >= ATH11K_MIN_6G_FREQ &&
++		    end_freq <= ATH11K_MAX_6G_FREQ)
++			num_invalid_5g_rules++;
++	}
++
++	return num_invalid_5g_rules;
++}
++
+ static int ath11k_pull_reg_chan_list_ext_update_ev(struct ath11k_base *ab,
+ 						   struct sk_buff *skb,
+ 						   struct cur_regulatory_info *reg_info)
+@@ -5853,27 +5874,6 @@ static int ath11k_pull_reg_chan_list_ext
+ 	memcpy(reg_info->alpha2, &ext_chan_list_event_hdr->alpha2,
+ 	       REG_ALPHA2_LEN);
+ 
+-	/* FIXME: Currently FW includes 6G reg rule also in 5G rule
+-	 * list for country US.
+-	 * Having same 6G reg rule in 5G and 6G rules list causes
+-	 * intersect check to be true, and same rules will be shown
+-	 * multiple times in iw cmd. So added hack below to avoid
+-	 * parsing 6G rule from 5G reg rule list, and this can be
+-	 * removed later, after FW updates to remove 6G reg rule
+-	 * from 5G rules list.
+-	 */
+-	if (memcmp(reg_info->alpha2, "US", 2) == 0) {
+-		ath11k_dbg(ab, ATH11K_DBG_WMI,
+-			   "US 5g reg rules number %d from fw",
+-			   reg_info->num_5g_reg_rules);
+-
+-		if (reg_info->num_5g_reg_rules > REG_US_5G_NUM_REG_RULES)
+-			skip_6g_rules_in_5g_rules = reg_info->num_5g_reg_rules -
+-						    REG_US_5G_NUM_REG_RULES;
+-
+-		reg_info->num_5g_reg_rules = REG_US_5G_NUM_REG_RULES;
+-		num_5g_reg_rules = reg_info->num_5g_reg_rules;
+-	}
+ 
+ 	reg_info->dfs_region = ext_chan_list_event_hdr->dfs_region;
+ 	reg_info->phybitmap = ext_chan_list_event_hdr->phybitmap;
+@@ -6009,6 +6009,28 @@ static int ath11k_pull_reg_chan_list_ext
+ 
+ 	ext_wmi_reg_rule += num_2g_reg_rules;
+ 
++	/* FIXME: Currently FW includes 6G reg rule also in 5G rule
++	 * list for few countries.
++	 * Having same 6G reg rule in 5G and 6G rules list causes
++	 * intersect check to be true, and same rules will be shown
++	 * multiple times in iw cmd. So added logic below to avoid
++	 * parsing 6G rule from 5G reg rule list, and this can be
++	 * removed later, after FW updates to remove 6G reg rule
++	 * from 5G rules list.
++	 */
++	skip_6g_rules_in_5g_rules = ath11k_invalid_5g_reg_ext_rules_from_wmi(num_5g_reg_rules,
++									     ext_wmi_reg_rule);
++
++	if(skip_6g_rules_in_5g_rules) {
++		ath11k_dbg(ab, ATH11K_DBG_WMI,
++			   "CC: %s 5g reg rules number %d from fw, %d number of invalid 5g rules",
++			   reg_info->alpha2, reg_info->num_5g_reg_rules,
++			   skip_6g_rules_in_5g_rules);
++
++		num_5g_reg_rules = num_5g_reg_rules - skip_6g_rules_in_5g_rules;
++		reg_info->num_5g_reg_rules = num_5g_reg_rules;
++	}
++
+ 	if (num_5g_reg_rules) {
+ 		reg_info->reg_rules_5g_ptr = create_ext_reg_rules_from_wmi(num_5g_reg_rules,
+ 									   ext_wmi_reg_rule);
+@@ -7525,7 +7547,7 @@ static int ath11k_reg_handle_chan_list(s
+ 		   "wmi handle chan list power type %d vdev type %d intersect %d\n",
+ 		   power_type, vdev_type, intersect);
+ 
+-	regd = ath11k_reg_build_regd(ab, reg_info, intersect, vdev_type, power_type);
++	regd = ath11k_reg_build_regd(ab, reg_info, intersect, power_type);
+ 	if (!regd) {
+ 		ath11k_warn(ab, "failed to build regd from reg_info\n");
+ 		goto fallback;
+--- a/drivers/net/wireless/ath/ath11k/wmi.h
++++ b/drivers/net/wireless/ath/ath11k/wmi.h
+@@ -4433,7 +4433,6 @@ struct wmi_he_rate_set {
+ #define MAX_REG_RULES 10
+ #define REG_ALPHA2_LEN 2
+ #define MAX_6G_REG_RULES 5
+-#define REG_US_5G_NUM_REG_RULES 4
+ 
+ enum wmi_start_event_param {
+ 	WMI_VDEV_START_RESP_EVENT = 0,

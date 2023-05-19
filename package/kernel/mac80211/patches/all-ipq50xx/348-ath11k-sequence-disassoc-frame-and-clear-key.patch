@@ -1,0 +1,171 @@
+From 5622e6e18b87b0acc843f16af605b233b539e01c Mon Sep 17 00:00:00 2001
+From: Hari Chandrakanthan <quic_haric@quicinc.com>
+Date: Thu, 24 Feb 2022 23:16:36 +0530
+Subject: [PATCH] ath11k: sequence disassoc frame and clear key
+
+During disassociation, the disassoc frame and clear key wmi cmd
+are sent to fw back to back.
+Due to this, fw clears the key and then processes the disassoc frame.
+When PMF is enabled, this leads to sending the disassoc frame
+without proper encryption. Hence, send the clear key wmi cmd
+to fw only after receiving the tx completion of disassoc frame.
+
+Signed-off-by: Hari Chandrakanthan <quic_haric@quicinc.com>
+---
+ drivers/net/wireless/ath/ath11k/core.h |  2 ++
+ drivers/net/wireless/ath/ath11k/mac.c  | 35 ++++++++++++++++++++++++++++++++++
+ drivers/net/wireless/ath/ath11k/mac.h  |  2 ++
+ drivers/net/wireless/ath/ath11k/wmi.c  | 14 ++++++++++++++
+ 4 files changed, 53 insertions(+)
+
+diff --git a/drivers/net/wireless/ath/ath11k/core.h b/drivers/net/wireless/ath/ath11k/core.h
+index fc43e4b..b9672f0 100644
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -594,6 +594,8 @@ struct ath11k_sta {
+ 	u32 ber_fail_bytes;
+ 	struct work_struct tid_config_wk;
+ 	struct ath11k_tid_qos_config tid_cfg[ATH11K_TID_MAX];
++	struct completion disassoc_comp;
++	bool tx_disassoc;
+ #ifdef CPTCFG_ATH11K_CFR
+ 	struct ath11k_per_peer_cfr_capture cfr_capture;
+ #endif
+diff --git a/drivers/net/wireless/ath/ath11k/mac.c b/drivers/net/wireless/ath/ath11k/mac.c
+index a9b5352..9229bfd 100644
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -4222,6 +4222,7 @@ static int ath11k_mac_op_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
+ 	const u8 *peer_addr;
+ 	int ret = 0;
+ 	u32 flags = 0;
++	unsigned long time_left;
+ 
+ 	/* BIP needs to be done in software */
+ 	if (key->cipher == WLAN_CIPHER_SUITE_AES_CMAC ||
+@@ -4317,6 +4318,14 @@ static int ath11k_mac_op_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
+ 	else
+ 		flags |= WMI_KEY_GROUP;
+ 
++	if (arsta && cmd == DISABLE_KEY && arsta->tx_disassoc) {
++		time_left = wait_for_completion_timeout(&arsta->disassoc_comp,
++							ATH11K_DISASSOC_TX_COMPLETION_TIMEOUT);
++		if (!time_left)
++			ath11k_warn(ab, "disassociation tx completion timeout %pM\n",
++				    sta->addr);
++	}
++
+ 	ret = ath11k_install_key(arvif, key, cmd, peer_addr, flags);
+ 	if (ret) {
+ 		ath11k_warn(ab, "ath11k_install_key failed (%d)\n", ret);
+@@ -4972,8 +4981,10 @@ static int ath11k_station_disassoc(struct ath11k *ar,
+ 				   struct ieee80211_sta *sta)
+ {
+ 	struct ath11k_vif *arvif = (void *)vif->drv_priv;
++	struct ath11k_sta *arsta = (struct ath11k_sta *)sta->drv_priv;
+ 	bool peer_dbg_info;
+ 	int ret = 0;
++	unsigned long time_left;
+ 
+ 	lockdep_assert_held(&ar->conf_mutex);
+ 
+@@ -4989,6 +5000,14 @@ static int ath11k_station_disassoc(struct ath11k *ar,
+ 			return ret;
+ 	}
+ 
++	if (arsta->tx_disassoc) {
++		time_left = wait_for_completion_timeout(&arsta->disassoc_comp,
++							ATH11K_DISASSOC_TX_COMPLETION_TIMEOUT);
++		if (!time_left)
++			ath11k_warn(ar->ab, "disassociation tx completion timeout sta %pM\n",
++				    sta->addr);
++	}
++
+ 	ret = ath11k_clear_peer_keys(arvif, sta->addr);
+ 	if (ret) {
+ 		ath11k_warn(ar->ab, "failed to clear all peer keys for vdev %i: %d\n",
+@@ -5719,6 +5738,8 @@ static int ath11k_mac_op_sta_state(struct ieee80211_hw *hw,
+ 		INIT_WORK(&arsta->update_wk, ath11k_sta_rc_update_wk);
+ 		INIT_WORK(&arsta->set_4addr_wk, ath11k_sta_set_4addr_wk);
+ 		INIT_WORK(&arsta->tid_config_wk, ath11k_sta_tid_cfg_wk);
++		init_completion(&arsta->disassoc_comp);
++		arsta->tx_disassoc = false;
+ 
+ 		ret = ath11k_mac_station_add(ar, vif, sta);
+ 		if (ret)
+@@ -6762,6 +6783,8 @@ static int ath11k_mac_mgmt_tx_wmi(struct ath11k *ar, struct ath11k_vif *arvif,
+ 	struct ath11k_base *ab = ar->ab;
+ 	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *)skb->data;
+ 	struct ieee80211_tx_info *info;
++	struct ath11k_peer *peer;
++	struct ath11k_sta *arsta;
+ 	dma_addr_t paddr;
+ 	bool tx_params_valid = false;
+ 	int buf_id;
+@@ -6810,6 +6833,18 @@ static int ath11k_mac_mgmt_tx_wmi(struct ath11k *ar, struct ath11k_vif *arvif,
+ 	    peer_is_in_cfr_unassoc_pool(ar, hdr->addr1))
+ 		tx_params_valid = true;
+ 
++	if (ieee80211_has_protected(hdr->frame_control) &&
++	    ieee80211_is_disassoc(hdr->frame_control)) {
++		spin_lock_bh(&ar->ab->base_lock);
++		peer = ath11k_peer_find_by_addr(ar->ab, hdr->addr1);
++		if (peer && peer->sta) {
++			arsta = (struct ath11k_sta *)peer->sta->drv_priv;
++			reinit_completion(&arsta->disassoc_comp);
++			arsta->tx_disassoc = true;
++		}
++		spin_unlock_bh(&ar->ab->base_lock);
++	}
++
+ 	ret = ath11k_wmi_mgmt_send(ar, arvif->vdev_id, buf_id, skb,
+ 				   tx_params_valid);
+ 	if (ret) {
+diff --git a/drivers/net/wireless/ath/ath11k/mac.h b/drivers/net/wireless/ath/ath11k/mac.h
+index 47f07de..8bcb4c0 100644
+--- a/drivers/net/wireless/ath/ath11k/mac.h
++++ b/drivers/net/wireless/ath/ath11k/mac.h
+@@ -125,6 +125,8 @@ struct ath11k_generic_iter {
+ #define ATH11K_OBSS_PD_SRG_EN				BIT(30)
+ #define ATH11K_OBSS_PD_NON_SRG_EN			BIT(31)
+ 
++#define ATH11K_DISASSOC_TX_COMPLETION_TIMEOUT    (3 * HZ)
++
+ extern const struct htt_rx_ring_tlv_filter ath11k_mac_mon_status_filter_default;
+ 
+ int ath11k_mac_ap_ps_recalc(struct ath11k *ar);
+diff --git a/drivers/net/wireless/ath/ath11k/wmi.c b/drivers/net/wireless/ath/ath11k/wmi.c
+index d60086e..10c5ce3 100644
+--- a/drivers/net/wireless/ath/ath11k/wmi.c
++++ b/drivers/net/wireless/ath/ath11k/wmi.c
+@@ -6376,6 +6376,8 @@ static int wmi_process_tx_comp(struct ath11k *ar, struct wmi_tx_compl_event *tx_
+ 	struct ieee80211_vif *vif;
+ 	struct ath11k_vif *arvif;
+ 	struct ath11k_mgmt_frame_stats *mgmt_stats;
++	struct ath11k_peer *peer;
++	struct ath11k_sta *arsta;
+ 	u16 frm_type;
+ 
+ 	spin_lock_bh(&ar->data_lock);
+@@ -6415,6 +6417,18 @@ static int wmi_process_tx_comp(struct ath11k *ar, struct wmi_tx_compl_event *tx_
+ 			mgmt_stats->tx_compl_fail[frm_type]++;
+ 	}
+ 
++	if (ieee80211_has_protected(hdr->frame_control) &&
++	    ieee80211_is_disassoc(hdr->frame_control)) {
++		spin_lock_bh(&ar->ab->base_lock);
++		peer = ath11k_peer_find_by_addr(ar->ab, hdr->addr1);
++		if (peer && peer->sta) {
++			arsta = (struct ath11k_sta *)peer->sta->drv_priv;
++			complete_all(&arsta->disassoc_comp);
++			arsta->tx_disassoc = false;
++		}
++		spin_unlock_bh(&ar->ab->base_lock);
++	}
++
+ skip_mgmt_stats:
+ 	spin_unlock_bh(&ar->data_lock);
+ 
+-- 
+2.7.4
+

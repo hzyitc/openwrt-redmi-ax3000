@@ -1,0 +1,78 @@
+From: Karthikeyan Periyasamy <periyasa@codeaurora.org>
+Subject: [PATCH] ath11k: fix q6 crash in authorize
+
+Signed-off-by: Karthikeyan Periyasamy <periyasa@codeaurora.org>
+---
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -2610,6 +2610,7 @@ static void ath11k_bss_assoc(struct ieee
+ 	};
+ 	struct ieee80211_sta *ap_sta;
+ 	struct ieee80211_sta_he_cap  he_cap;
++	struct ath11k_peer *peer;
+ 	int ret;
+ 
+ 	lockdep_assert_held(&ar->conf_mutex);
+@@ -2684,13 +2685,19 @@ static void ath11k_bss_assoc(struct ieee
+ 		return;
+ 	}
+ 
+-	/* Authorize BSS Peer */
+-	ret = ath11k_wmi_set_peer_param(ar, arvif->bssid,
+-					arvif->vdev_id,
+-					WMI_PEER_AUTHORIZE,
+-					1);
+-	if (ret)
+-		ath11k_warn(ar->ab, "Unable to authorize BSS peer: %d\n", ret);
++	spin_lock_bh(&ar->ab->base_lock);
++
++	peer = ath11k_peer_find(ar->ab, arvif->vdev_id, arvif->bssid);
++	if (peer && peer->is_authorized) {
++		ret = ath11k_wmi_set_peer_param(ar, arvif->bssid,
++						arvif->vdev_id,
++						WMI_PEER_AUTHORIZE,
++						1);
++		if (ret)
++			ath11k_warn(ar->ab, "Unable to authorize BSS peer: %d\n", ret);
++	}
++
++	spin_unlock_bh(&ar->ab->base_lock);
+ 
+ 	ret = ath11k_wmi_send_obss_spr_cmd(ar, arvif->vdev_id,
+ 					   &bss_conf->he_obss_pd);
+@@ -4527,6 +4534,25 @@ static int ath11k_mac_op_sta_state(struc
+ 			ath11k_warn(ar->ab, "Failed to associate station: %pM\n",
+ 				    sta->addr);
+ 	} else if (old_state == IEEE80211_STA_ASSOC &&
++		   new_state == IEEE80211_STA_AUTHORIZED) {
++		spin_lock_bh(&ar->ab->base_lock);
++
++		peer = ath11k_peer_find(ar->ab, arvif->vdev_id, sta->addr);
++		if (peer)
++			peer->is_authorized = true;
++
++		spin_unlock_bh(&ar->ab->base_lock);
++
++		if (vif->type == NL80211_IFTYPE_STATION && arvif->is_up) {
++			ret = ath11k_wmi_set_peer_param(ar, sta->addr,
++							arvif->vdev_id,
++							WMI_PEER_AUTHORIZE,
++							1);
++			if (ret)
++				ath11k_warn(ar->ab, "Unable to authorize peer (%pM) vdev %d: %d\n",
++					    sta->addr, arvif->vdev_id, ret);
++		}
++	} else if (old_state == IEEE80211_STA_ASSOC &&
+ 		   new_state == IEEE80211_STA_AUTH &&
+ 		   (vif->type == NL80211_IFTYPE_AP ||
+ 		    vif->type == NL80211_IFTYPE_MESH_POINT ||
+--- a/drivers/net/wireless/ath/ath11k/peer.h
++++ b/drivers/net/wireless/ath/ath11k/peer.h
+@@ -89,6 +89,7 @@ struct ath11k_peer {
+ 
+ 	struct ppdu_user_delayba ppdu_stats_delayba;
+ 	bool delayba_flag;
++	bool is_authorized;
+ };
+ 
+ void ath11k_peer_unmap_event(struct ath11k_base *ab, u16 peer_id);

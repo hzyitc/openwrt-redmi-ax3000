@@ -1,0 +1,379 @@
+From 1634cf729a978d025cfe726ef0d1796af6cdea36 Mon Sep 17 00:00:00 2001
+From: Hari Chandrakanthan <quic_haric@quicinc.com>
+Date: Wed, 1 Dec 2021 12:21:06 +0530
+Subject: [PATCH] mac80211 : add support to awgn detection and mitigation in
+ 6Ghz
+
+when awgn interference is detected on operating channel,
+AP is supposed to stop transmitting in that channel.
+AP can reduce it's operating bandwidth or
+completely move to another channel based on the
+interference segment.
+
+support to send nl event upon detecting awgn in 6Ghz is added
+
+When awgn wmi event is detected by the driver, driver notifies mac80211
+with the channel interference bitmap and mac80211 sends the operating
+channel info and the channel interference bitmap to userspace through
+NL80211_CMD_AWGN_DETECT cmd and NL80211_ATTR_AWGN_INTERFERENCE_BITMAP
+attribute. If the interference is on the primary channel, the userspace
+tool completely switches to a new channel or it reduces bandwidth on the
+same operating channel.
+
+Signed-off-by: Hari Chandrakanthan <quic_haric@quicinc.com>
+---
+ include/net/cfg80211.h       | 13 ++++++++++
+ include/net/mac80211.h       |  5 ++--
+ include/uapi/linux/nl80211.h | 10 ++++++++
+ net/mac80211/ieee80211_i.h   |  5 ++--
+ net/mac80211/iface.c         |  3 ---
+ net/mac80211/main.c          |  4 +++
+ net/mac80211/util.c          | 61 +++++++++++++++++++++++++-------------------
+ net/wireless/mlme.c          |  9 +++++++
+ net/wireless/nl80211.c       | 37 +++++++++++++++++++++++++++
+ net/wireless/nl80211.h       |  5 ++++
+ 10 files changed, 119 insertions(+), 33 deletions(-)
+
+diff --git a/include/net/cfg80211.h b/include/net/cfg80211.h
+index eebe8ba..781aa79 100644
+--- a/include/net/cfg80211.h
++++ b/include/net/cfg80211.h
+@@ -7585,6 +7585,19 @@ void cfg80211_radar_event(struct wiphy *wiphy,
+ 			  struct cfg80211_chan_def *chandef, gfp_t gfp);
+ 
+ /**
++ * cfg80211_awgn_event - awgn detection event
++ * @wiphy: the wiphy
++ * @chandef: chandef for the current channel
++ * @gfp: context flags
++ * @chan_bw_interference_bitmap: channel bandwidth interference bitmap
++ *
++ * This function is called when Additive white Gaussian noise (AWGN)
++ * is detected on the current channel.
++ */
++void cfg80211_awgn_event(struct wiphy *wiphy, struct cfg80211_chan_def *chandef,
++			 gfp_t gfp, u32 chan_bw_interference_bitmap);
++
++/**
+  * cfg80211_sta_opmode_change_notify - STA's ht/vht operation mode change event
+  * @dev: network device
+  * @mac: MAC address of a station which opmode got modified
+diff --git a/include/net/mac80211.h b/include/net/mac80211.h
+index ae805b1..002354c 100644
+--- a/include/net/mac80211.h
++++ b/include/net/mac80211.h
+@@ -6268,9 +6268,10 @@ void ieee80211_chswitch_done(struct ieee80211_vif *vif, bool success);
+ /**
+  * ieee80211_awgn_detected - inform that awgn interference is detected
+  *
+- * @vif: &struct ieee80211_vif pointer from the add_interface callback.
++ * @hw: pointer as obtained from ieee80211_alloc_hw()
++ * @chan_bw_interference_bitmap : awgn interference bitmap
+  */
+-void ieee80211_awgn_detected(struct ieee80211_vif *vif);
++void ieee80211_awgn_detected(struct ieee80211_hw *hw, u32 chan_bw_interference_bitmap);
+ 
+ /**
+  * ieee80211_request_smps - request SM PS transition
+diff --git a/include/uapi/linux/nl80211.h b/include/uapi/linux/nl80211.h
+index a2e10f5..dbf1a3a 100644
+--- a/include/uapi/linux/nl80211.h
++++ b/include/uapi/linux/nl80211.h
+@@ -1209,6 +1209,11 @@
+  * @NL80211_CMD_COLOR_CHANGE_ANNOUNCEMENT_COMPLETED: Notify userland that the color change
+  *     has completed
+  *
++ *
++ * @NL80211_CMD_AWGN_DETECT: Once AWGN interference is detected on the operating
++ *	channel, userspace is notified with the interference bitmap using
++ *	%NL80211_ATTR_AWGN_INTERFERENCE_BITMAP
++
+  * @NL80211_CMD_MAX: highest used command number
+  * @__NL80211_CMD_AFTER_LAST: internal use
+  */
+@@ -1453,6 +1458,7 @@ enum nl80211_commands {
+ 	NL80211_CMD_COLOR_CHANGE_ANNOUNCEMENT_ABORTED,
+ 	NL80211_CMD_COLOR_CHANGE_ANNOUNCEMENT_COMPLETED,
+ 
++	NL80211_CMD_AWGN_DETECT,
+ 	/* add new commands above here */
+ 
+ 	/* used to define NL80211_CMD_MAX below */
+@@ -2639,6 +2645,8 @@ enum nl80211_commands {
+  * @NL80211_ATTR_BEACON_TX_MODE: used to configure the beacon tx mode as
+  *	staggered mode = 1 or burst mode = 2 in %NL80211_CMD_START_AP or
+  *	%NL80211_CMD_JOIN_MESH from user-space.
++ * @NL80211_ATTR_AWGN_INTERFERENCE_BITMAP: u32 attribute specifying the
++ *	interference bitmap of operating bandwidth for %NL80211_CMD_AWGN_DETECT
+  * @NUM_NL80211_ATTR: total number of nl80211_attrs available
+  * @NL80211_ATTR_MAX: highest attribute number currently defined
+  * @__NL80211_ATTR_AFTER_LAST: internal use
+@@ -3158,6 +3166,8 @@ enum nl80211_attrs {
+ 
+ 	NL80211_ATTR_STA_MGMT_RTS_CTS_CONFIG,
+ 
++	NL80211_ATTR_AWGN_INTERFERENCE_BITMAP,
++
+ 	/* add attributes here, update the policy in nl80211.c */
+ 
+ 	__NL80211_ATTR_AFTER_LAST,
+diff --git a/net/mac80211/ieee80211_i.h b/net/mac80211/ieee80211_i.h
+index fc1e902..bb46c22 100644
+--- a/net/mac80211/ieee80211_i.h
++++ b/net/mac80211/ieee80211_i.h
+@@ -954,8 +954,6 @@ struct ieee80211_sub_if_data {
+ 	bool csa_block_tx; /* write-protected by sdata_lock and local->mtx */
+ 	struct cfg80211_chan_def csa_chandef;
+ 
+-	struct work_struct awgn_detected_work;
+-
+ 	struct work_struct color_change_finalize_work;
+ 
+ 	struct list_head assigned_chanctx_list; /* protected by chanctx_mtx */
+@@ -1465,6 +1463,8 @@ struct ieee80211_local {
+ 	struct sk_buff_head skb_queue_tdls_chsw;
+ 
+ 	struct mac80211_memory_stats memory_stats;
++	struct work_struct awgn_detected_work;
++	u32 chan_bw_interference_bitmap;
+ };
+ 
+ static inline struct ieee80211_sub_if_data *
+@@ -2305,6 +2305,7 @@ void ieee80211_dfs_cac_timer(unsigned long data);
+ void ieee80211_dfs_cac_timer_work(struct work_struct *work);
+ void ieee80211_dfs_cac_cancel(struct ieee80211_local *local);
+ void ieee80211_dfs_radar_detected_work(struct work_struct *work);
++void ieee80211_awgn_detected_work(struct work_struct *work);
+ int ieee80211_send_action_csa(struct ieee80211_sub_if_data *sdata,
+ 			      struct cfg80211_csa_settings *csa_settings);
+ 
+diff --git a/net/mac80211/iface.c b/net/mac80211/iface.c
+index 152e76b..5d874eb 100644
+--- a/net/mac80211/iface.c
++++ b/net/mac80211/iface.c
+@@ -476,8 +476,6 @@ static void ieee80211_do_stop(struct ieee80211_sub_if_data *sdata, bool going_do
+ 	sdata_unlock(sdata);
+ 
+ 	cancel_work_sync(&sdata->csa_finalize_work);
+-	cancel_work_sync(&sdata->awgn_detected_work);
+-
+ 	cancel_delayed_work_sync(&sdata->dfs_cac_timer_work);
+ 
+ 	if (sdata->wdev.cac_started) {
+@@ -1680,7 +1678,6 @@ static void ieee80211_setup_sdata(struct ieee80211_sub_if_data *sdata,
+ 	INIT_WORK(&sdata->work, ieee80211_iface_work);
+ 	INIT_WORK(&sdata->recalc_smps, ieee80211_recalc_smps_work);
+ 	INIT_WORK(&sdata->csa_finalize_work, ieee80211_csa_finalize_work);
+-	INIT_WORK(&sdata->awgn_detected_work, ieee80211_awgn_interference_detected_work);
+ 	INIT_WORK(&sdata->color_change_finalize_work, ieee80211_color_change_finalize_work);
+ 	INIT_LIST_HEAD(&sdata->assigned_chanctx_list);
+ 	INIT_LIST_HEAD(&sdata->reserved_chanctx_list);
+diff --git a/net/mac80211/main.c b/net/mac80211/main.c
+index f644172..87229b2 100644
+--- a/net/mac80211/main.c
++++ b/net/mac80211/main.c
+@@ -272,6 +272,7 @@ static void ieee80211_restart_work(struct work_struct *work)
+ 	     "%s called with hardware scan in progress\n", __func__);
+ 
+ 	flush_work(&local->radar_detected_work);
++	flush_work(&local->awgn_detected_work);
+ 	/* we might do interface manipulations, so need both */
+ 	rtnl_lock();
+ 	wiphy_lock(local->hw.wiphy);
+@@ -721,6 +722,8 @@ struct ieee80211_hw *ieee80211_alloc_hw_nm(size_t priv_data_len,
+ 
+ 	INIT_WORK(&local->radar_detected_work,
+ 		  ieee80211_dfs_radar_detected_work);
++	INIT_WORK(&local->awgn_detected_work,
++		  ieee80211_awgn_detected_work);
+ 
+ 	INIT_WORK(&local->reconfig_filter, ieee80211_reconfig_filter);
+ 	local->smps_mode = IEEE80211_SMPS_OFF;
+@@ -1388,6 +1391,7 @@ void ieee80211_unregister_hw(struct ieee80211_hw *hw)
+ 	cancel_work_sync(&local->tdls_chsw_work);
+ 	flush_work(&local->sched_scan_stopped_work);
+ 	flush_work(&local->radar_detected_work);
++	flush_work(&local->awgn_detected_work);
+ 
+ 	ieee80211_clear_tx_pending(local);
+ 	rate_control_deinitialize(local);
+diff --git a/net/mac80211/util.c b/net/mac80211/util.c
+index 7cebaa8..a285d12 100644
+--- a/net/mac80211/util.c
++++ b/net/mac80211/util.c
+@@ -3860,6 +3860,32 @@ void ieee80211_dfs_cac_cancel(struct ieee80211_local *local)
+ 	mutex_unlock(&local->mtx);
+ }
+ 
++void ieee80211_awgn_detected_work(struct work_struct *work)
++{
++	struct ieee80211_local *local =
++		container_of(work, struct ieee80211_local, awgn_detected_work);
++	struct cfg80211_chan_def chandef = local->hw.conf.chandef;
++	struct ieee80211_chanctx *ctx;
++	int num_chanctx = 0;
++
++	mutex_lock(&local->chanctx_mtx);
++	list_for_each_entry(ctx, &local->chanctx_list, list) {
++		if (ctx->replace_state == IEEE80211_CHANCTX_REPLACES_OTHER)
++			continue;
++
++		num_chanctx++;
++		chandef = ctx->conf.def;
++	}
++	mutex_unlock(&local->chanctx_mtx);
++
++	if (num_chanctx > 1)
++		/* XXX: multi-channel is not supported yet */
++		WARN_ON_ONCE(1);
++	else
++		cfg80211_awgn_event(local->hw.wiphy, &chandef, GFP_KERNEL,
++				    local->chan_bw_interference_bitmap);
++}
++
+ void ieee80211_dfs_radar_detected_work(struct work_struct *work)
+ {
+ 	struct ieee80211_local *local =
+@@ -3899,6 +3925,15 @@ void ieee80211_radar_detected(struct ieee80211_hw *hw)
+ }
+ EXPORT_SYMBOL(ieee80211_radar_detected);
+ 
++void ieee80211_awgn_detected(struct ieee80211_hw *hw, u32 chan_bw_interference_bitmap)
++{
++	struct ieee80211_local *local = hw_to_local(hw);
++
++	local->chan_bw_interference_bitmap = chan_bw_interference_bitmap;
++	schedule_work(&local->awgn_detected_work);
++}
++EXPORT_SYMBOL(ieee80211_awgn_detected);
++
+ u32 ieee80211_chandef_downgrade(struct cfg80211_chan_def *c)
+ {
+ 	u32 ret;
+@@ -3964,32 +3999,6 @@ u32 ieee80211_chandef_downgrade(struct cfg80211_chan_def *c)
+ 	return ret;
+ }
+ 
+-void ieee80211_awgn_interference_detected_work(struct work_struct *work)
+-{
+-	struct ieee80211_sub_if_data *sdata =
+-		container_of(work, struct ieee80211_sub_if_data, awgn_detected_work);
+-
+-	sdata_lock(sdata);
+-
+-	if (!ieee80211_sdata_running(sdata))
+-		goto unlock;
+-
+-	cfg80211_stop_iface(sdata->local->hw.wiphy, &sdata->wdev,
+-			    GFP_KERNEL);
+-
+-unlock:
+-	sdata_unlock(sdata);
+-}
+-
+-void ieee80211_awgn_detected(struct ieee80211_vif *vif)
+-{
+-	struct ieee80211_sub_if_data *sdata = vif_to_sdata(vif);
+-
+-	ieee80211_queue_work(&sdata->local->hw,
+-			     &sdata->awgn_detected_work);
+-}
+-EXPORT_SYMBOL(ieee80211_awgn_detected);
+-
+ /*
+  * Returns true if smps_mode_new is strictly more restrictive than
+  * smps_mode_old.
+diff --git a/net/wireless/mlme.c b/net/wireless/mlme.c
+index a8a17b9..3705eda 100644
+--- a/net/wireless/mlme.c
++++ b/net/wireless/mlme.c
+@@ -926,6 +926,15 @@ void cfg80211_radar_event(struct wiphy *wiphy,
+ }
+ EXPORT_SYMBOL(cfg80211_radar_event);
+ 
++void cfg80211_awgn_event(struct wiphy *wiphy, struct cfg80211_chan_def *chandef,
++			 gfp_t gfp, u32 chan_bw_interference_bitmap)
++{
++	struct cfg80211_registered_device *rdev = wiphy_to_rdev(wiphy);
++
++	nl80211_awgn_notify(rdev, chandef, NULL, gfp, chan_bw_interference_bitmap);
++}
++EXPORT_SYMBOL(cfg80211_awgn_event);
++
+ void cfg80211_cac_event(struct net_device *netdev,
+ 			const struct cfg80211_chan_def *chandef,
+ 			enum nl80211_radar_event event, gfp_t gfp)
+diff --git a/net/wireless/nl80211.c b/net/wireless/nl80211.c
+index bd93def..62e9d13 100644
+--- a/net/wireless/nl80211.c
++++ b/net/wireless/nl80211.c
+@@ -802,6 +802,7 @@ static const struct nla_policy nl80211_policy[NUM_NL80211_ATTR] = {
+ 	[NL80211_ATTR_BEACON_TX_MODE] = NLA_POLICY_RANGE(NLA_U32, 1, 2),
+ 	[NL80211_ATTR_STA_MGMT_RTS_CTS_CONFIG] =
+ 					NLA_POLICY_MAX(NLA_U8, NL80211_MGMT_RTS_CTS_DISABLE),
++	[NL80211_ATTR_AWGN_INTERFERENCE_BITMAP] = { .type = NLA_U32 },
+ };
+ 
+ /* policy for the key attributes */
+@@ -17726,6 +17727,42 @@ void cfg80211_ch_switch_notify(struct net_device *dev,
+ }
+ EXPORT_SYMBOL(cfg80211_ch_switch_notify);
+ 
++void nl80211_awgn_notify(struct cfg80211_registered_device *rdev,
++			 struct cfg80211_chan_def *chandef,
++			 struct net_device *netdev,
++			 gfp_t gfp, u32 chan_bw_interference_bitmap)
++{
++	struct sk_buff *msg;
++	void *hdr;
++	int ret;
++
++	msg = nlmsg_new(NLMSG_DEFAULT_SIZE, gfp);
++	if (!msg)
++		return;
++
++	hdr = nl80211hdr_put(msg, 0, 0, 0, NL80211_CMD_AWGN_DETECT);
++	if (!hdr) {
++		nlmsg_free(msg);
++		return;
++	}
++
++	if (nl80211_send_chandef(msg, chandef))
++		goto nla_put_failure;
++
++	if (nla_put_u32(msg, NL80211_ATTR_AWGN_INTERFERENCE_BITMAP,
++			chan_bw_interference_bitmap))
++		goto nla_put_failure;
++
++	genlmsg_end(msg, hdr);
++
++	ret = genlmsg_multicast_netns(&nl80211_fam, wiphy_net(&rdev->wiphy), msg, 0,
++				      NL80211_MCGRP_MLME, gfp);
++	return;
++
++nla_put_failure:
++	nlmsg_free(msg);
++}
++
+ void cfg80211_ch_switch_started_notify(struct net_device *dev,
+ 				       struct cfg80211_chan_def *chandef,
+ 				       u8 count, bool quiet)
+diff --git a/net/wireless/nl80211.h b/net/wireless/nl80211.h
+index a3f3877..7b899c9 100644
+--- a/net/wireless/nl80211.h
++++ b/net/wireless/nl80211.h
+@@ -120,6 +120,11 @@ nl80211_radar_notify(struct cfg80211_registered_device *rdev,
+ 		     enum nl80211_radar_event event,
+ 		     struct net_device *netdev, gfp_t gfp);
+ 
++void nl80211_awgn_notify(struct cfg80211_registered_device *rdev,
++			 struct cfg80211_chan_def *chandef,
++			 struct net_device *netdev,
++			 gfp_t gfp, u32 chan_bw_interference_bitmap);
++
+ void nl80211_send_ap_stopped(struct wireless_dev *wdev);
+ 
+ void cfg80211_rdev_free_coalesce(struct cfg80211_registered_device *rdev);
+-- 
+2.7.4
+

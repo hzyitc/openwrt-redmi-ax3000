@@ -1,0 +1,324 @@
+From 7e60fcbabb73492ac473e585e6d6be5fc5e31e6b Mon Sep 17 00:00:00 2001
+From: Abinaya Kalaiselvan <akalaise@codeaurora.org>
+Date: Thu, 12 Aug 2021 12:42:53 +0530
+Subject: [PATCH] ath11k: add CFR capture support for ipq5018 & qcn6122
+
+This change is to add single shot/periodic CFR capture
+support for ipq5018 and qcn6122.
+
+To enable/disable cfr feature use command,
+echo <val> > /sys/kernel/debug/ieee80211/phyX/ath11k/enable_cfr
+where, val: 0 to disable CFR and 1 to enable CFR.
+
+To enable CFR capture for associated peers,
+echo "<val> <bw> <periodicity> <method>"
+ > /sys/kernel/debug/ieee80211/phyX/netdev\:wlanx/stations/<mac>/cfr_capture
+val: 0 - stop CFR capture
+        1 - start CFR capture
+bw: CFR capture bandwidth
+        0 - 20MHZ
+        1 - 40MHZ
+        2 - 80MHZ
+Periodicity: Periodicity at which hardware is expceted to collect CFR dump.
+        0 - single shot capture.
+        non zero - for Periodic captures (value should be multiple of 10).
+method: Method used by hardware to collect the CFR dump.
+        0 - from the ACKs of QOS NULL packets.
+
+To enable CFR capture for unassociated clients,
+echo “<mac address> <val> <periodicity>”
+ > /sys/kernel/debug/ieee80211/phyX/ath11k/cfr_unassoc
+Mac address: mac address of the client.
+Val: 0 - start CFR capture
+     1 – stop CFR capture
+Periodicity: Periodicity at which hardware is expceted to collect CFR dump.
+        0 - single shot capture.
+        non zero - for Periodic captures (value should be multiple of 10).
+
+To collect the cfr dump,
+cat /sys/kernel/debug/ieee80211/phy0/ath11k/cfr_capture0 > /tmp/cfr.bin
+
+Change-Id: I5082e4caeb4ce8252544b0f0ced1e63cab65ae28
+Signed-off-by: Abinaya Kalaiselvan <akalaise@codeaurora.org>
+---
+ drivers/net/wireless/ath/ath11k/cfr.c  | 10 ++---
+ drivers/net/wireless/ath/ath11k/cfr.h  |  5 +--
+ drivers/net/wireless/ath/ath11k/core.c | 24 +++++++++--
+ drivers/net/wireless/ath/ath11k/hw.c   | 78 ++++++++++++++++++++++++++++++++++
+ drivers/net/wireless/ath/ath11k/hw.h   |  2 +
+ 5 files changed, 108 insertions(+), 11 deletions(-)
+
+--- a/drivers/net/wireless/ath/ath11k/cfr.c
++++ b/drivers/net/wireless/ath/ath11k/cfr.c
+@@ -190,10 +190,11 @@ static int ath11k_cfr_correlate_and_rela
+ 					   "dbr event -> txrx event delay = %u ms",
+ 					   jiffies_to_msecs(diff));
+ 			}
+-
+-			if (ar->ab->hw_rev == ATH11K_HW_QCN9074_HW10) {
+-				if (lut->header_length > CFR_HDR_MAX_LEN_WORDS_QCN9074 ||
+-				    lut->payload_length > CFR_DATA_MAX_LEN_QCN9074) {
++			 /* Skip for IPQ8074, since its header length and data
++			    length are calculated in host itself */
++			if (ar->ab->hw_rev != ATH11K_HW_IPQ8074) {
++				if (lut->header_length > ar->ab->hw_params.cfr_max_header_len_words ||
++				    lut->payload_length > ar->ab->hw_params.cfr_max_data_len) {
+ 					cfr->invalid_dma_length_cnt++;
+ 					ath11k_dbg(ar->ab, ATH11K_DBG_CFR,
+ 						   "Invalid hdr/payload len hdr %u payload %u\n",
+@@ -202,7 +203,6 @@ static int ath11k_cfr_correlate_and_rela
+ 					return ATH11K_CORRELATE_STATUS_ERR;
+ 				}
+ 			}
+-
+ 			ath11k_cfr_free_pending_dbr_events(ar);
+ 
+ 			cfr->release_cnt++;
+@@ -568,9 +568,9 @@ int ath11k_process_cfr_capture_event(str
+ 	lut->txrx_tstamp = jiffies;
+ 
+ 	header = &lut->header;
+-	header->start_magic_num = ATH11K_CFR_START_MAGIC;
+-	header->vendorid = VENDOR_QCA;
+-	header->pltform_type = PLATFORM_TYPE_ARM;
++	header->cmn.start_magic_num = ATH11K_CFR_START_MAGIC;
++	header->cmn.vendorid = VENDOR_QCA;
++	header->cmn.pltform_type = PLATFORM_TYPE_ARM;
+ 
+ 	ab->hw_params.hw_ops->fill_cfr_hdr_info(ar, header, params);
+ 
+@@ -652,7 +652,7 @@ static ssize_t ath11k_write_file_enable_
+ 	u8 enable_cfr;
+ 	int ret;
+ 
+-	if (kstrtouint_from_user(ubuf, count, 0, &enable_cfr))
++	if (kstrtou8_from_user(ubuf, count, 0, &enable_cfr))
+ 		return -EINVAL;
+ 
+ 	mutex_lock(&ar->conf_mutex);
+--- a/drivers/net/wireless/ath/ath11k/cfr.h
++++ b/drivers/net/wireless/ath/ath11k/cfr.h
+@@ -22,9 +22,8 @@
+ 
+ #define ATH11K_CFR_RADIO_IPQ8074 23
+ #define ATH11K_CFR_RADIO_QCN9074 26
+-
+-#define CFR_HDR_MAX_LEN_WORDS_QCN9074 50
+-#define CFR_DATA_MAX_LEN_QCN9074 16384
++#define ATH11K_CFR_RADIO_IPQ5018 28
++#define ATH11K_CFR_RADIO_QCN6122 30
+ 
+ #define VENDOR_QCA 0x8cfdf0
+ #define PLATFORM_TYPE_ARM 2
+@@ -197,7 +196,10 @@ struct cfr_metadata_version_5 {
+ 	u32 rx_start_ts;
+ } __packed;
+ 
+-struct ath11k_csi_cfr_header {
++#define ATH11K_CFR_METADATA_LEN \
++	(sizeof(struct ath11k_csi_cfr_header) - sizeof(struct cfr_header_cmn))
++
++struct cfr_header_cmn {
+ 	u32 start_magic_num;
+ 	u32 vendorid;
+ 	u8 cfr_metadata_version;
+@@ -205,6 +207,10 @@ struct ath11k_csi_cfr_header {
+ 	u8 chip_type;
+ 	u8 pltform_type;
+ 	u32 cfr_metadata_len;
++} __packed;
++
++struct ath11k_csi_cfr_header {
++	struct cfr_header_cmn cmn;
+ 	union {
+ 		struct cfr_metadata_version_1 meta_v1;
+ 		struct cfr_metadata_version_2 meta_v2;
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -291,12 +291,12 @@ static const struct ath11k_hw_params ath
+ 		.cfr_support = true,
+ 		.cfr_dma_hdr_size = sizeof(struct ath11k_cfir_enh_dma_hdr),
+ 		.cfr_num_stream_bufs = 255,
++		.cfr_max_header_len_words = 50,
++		.cfr_max_data_len = 16384,
+ 		/* sizeof (ath11k_csi_cfr_header) + max cfr header(200 bytes) +
+ 		 * max cfr payload(16384 bytes)
+ 		 */
+-		.cfr_stream_buf_size = sizeof(struct ath11k_csi_cfr_header) +
+-					(CFR_HDR_MAX_LEN_WORDS_QCN9074 *4) +
+-					CFR_DATA_MAX_LEN_QCN9074,
++		.cfr_stream_buf_size = 16716,
+ 		/* In addition to TCL ring use TCL_CMD ring also for tx */
+ 		.max_tx_ring = DP_TCL_NUM_RING_MAX + 1,
+ 		.wakeup_mhi = false,
+@@ -357,6 +357,15 @@ static const struct ath11k_hw_params ath
+ 		.wakeup_mhi = false,
+ 		.reo_status_poll = true,
+ 		.num_vdevs_peers = ath11k_vdevs_peers_ipq5018,
++		.cfr_support = true,
++		.cfr_dma_hdr_size = sizeof(struct ath11k_cfir_dma_hdr),
++		.cfr_num_stream_bufs = 255,
++		.cfr_max_header_len_words = 16,
++		.cfr_max_data_len = 4096,
++		/* sizeof (ath11k_csi_cfr_header) + cfr uCode header(64 bytes) +
++		 * max cfr payload(4096 bytes)
++		 */
++		.cfr_stream_buf_size = 4292,
+ 	},
+ 	{
+ 		.hw_rev = ATH11K_HW_QCN6122,
+@@ -412,6 +421,15 @@ static const struct ath11k_hw_params ath
+ 		.wakeup_mhi = false,
+ 		.reo_status_poll = true,
+ 		.num_vdevs_peers = ath11k_vdevs_peers_ipq5018,
++		.cfr_support = true,
++		.cfr_dma_hdr_size = sizeof(struct ath11k_cfir_enh_dma_hdr),
++		.cfr_num_stream_bufs = 255,
++		.cfr_max_header_len_words = 16,
++		.cfr_max_data_len = 16384,
++		/* sizeof (ath11k_csi_cfr_header) + cfr uCode header(64 bytes) +
++		 * cfr payload(16384 bytes)
++		*/
++		.cfr_stream_buf_size = 16580,
+  	},
+ };
+ 
+--- a/drivers/net/wireless/ath/ath11k/hw.c
++++ b/drivers/net/wireless/ath/ath11k/hw.c
+@@ -878,11 +878,11 @@ void ath11k_hw_ipq8074_fill_cfr_hdr_info
+ 					 struct ath11k_csi_cfr_header *header,
+ 					 struct ath11k_cfr_peer_tx_param *params)
+ {
+-	header->cfr_metadata_version = ATH11K_CFR_META_VERSION_4;
+-	header->cfr_data_version = ATH11K_CFR_DATA_VERSION_1;
+-	header->cfr_metadata_len =sizeof(struct cfr_metadata_version_4);
++	header->cmn.cfr_metadata_version = ATH11K_CFR_META_VERSION_4;
++	header->cmn.cfr_data_version = ATH11K_CFR_DATA_VERSION_1;
++	header->cmn.cfr_metadata_len = ATH11K_CFR_METADATA_LEN;
+ 	/* TODO: can we add this chip_type to hw param table */
+-	header->chip_type = ATH11K_CFR_RADIO_IPQ8074;
++	header->cmn.chip_type = ATH11K_CFR_RADIO_IPQ8074;
+ 	header->u.meta_v4.status = FIELD_GET(WMI_CFR_PEER_CAPTURE_STATUS,
+ 					     params->status);
+ 	header->u.meta_v4.capture_bw = params->bandwidth;
+@@ -915,10 +915,10 @@ void ath11k_hw_qcn9074_fill_cfr_hdr_info
+ 					 struct ath11k_csi_cfr_header *header,
+ 					 struct ath11k_cfr_peer_tx_param *params)
+ {
+-	header->cfr_metadata_version = ATH11K_CFR_META_VERSION_5;
+-	header->cfr_data_version = ATH11K_CFR_DATA_VERSION_1;
+-	header->chip_type = ATH11K_CFR_RADIO_QCN9074;
+-	header->cfr_metadata_len = sizeof(struct cfr_metadata_version_5);
++	header->cmn.cfr_metadata_version = ATH11K_CFR_META_VERSION_5;
++	header->cmn.cfr_data_version = ATH11K_CFR_DATA_VERSION_1;
++	header->cmn.chip_type = ATH11K_CFR_RADIO_QCN9074;
++	header->cmn.cfr_metadata_len = ATH11K_CFR_METADATA_LEN;
+ 	header->u.meta_v5.status = FIELD_GET(WMI_CFR_PEER_CAPTURE_STATUS,
+ 					     params->status);
+ 	header->u.meta_v5.capture_bw = params->bandwidth;
+@@ -944,6 +944,78 @@ void ath11k_hw_qcn9074_fill_cfr_hdr_info
+ 	       sizeof(params->agc_gain));
+ }
+ 
++void ath11k_hw_ipq5018_fill_cfr_hdr_info(struct ath11k *ar,
++					 struct ath11k_csi_cfr_header *header,
++					 struct ath11k_cfr_peer_tx_param *params)
++{
++	header->cmn.cfr_metadata_version = ATH11K_CFR_META_VERSION_5;
++	header->cmn.cfr_data_version = ATH11K_CFR_DATA_VERSION_1;
++	header->cmn.cfr_metadata_len = ATH11K_CFR_METADATA_LEN;
++	/* TODO: can we add this chip_type to hw param table */
++	header->cmn.chip_type = ATH11K_CFR_RADIO_IPQ5018;
++	header->u.meta_v5.status = FIELD_GET(WMI_CFR_PEER_CAPTURE_STATUS,
++					     params->status);
++	header->u.meta_v5.capture_bw = params->bandwidth;
++	header->u.meta_v5.phy_mode = ar->cfr_phymode;
++	header->u.meta_v5.prim20_chan = params->primary_20mhz_chan;
++	header->u.meta_v5.center_freq1 = params->band_center_freq1;
++	header->u.meta_v5.center_freq2 = params->band_center_freq2;
++
++	/* Currently CFR data is captured on ACK of a Qos NULL frame.
++	 * For 20 MHz, ACK is Legacy and for 40/80/160, ACK is DUP Legacy.
++	 */
++	header->u.meta_v5.capture_mode = params->bandwidth ?
++		ATH11K_CFR_CAPTURE_DUP_LEGACY_ACK : ATH11K_CFR_CAPTURE_LEGACY_ACK;
++	header->u.meta_v5.capture_type = params->capture_method;
++	header->u.meta_v5.num_rx_chain = ar->cfg_rx_chainmask;
++	header->u.meta_v5.sts_count = params->spatial_streams;
++	header->u.meta_v5.timestamp = params->timestamp_us;
++	header->u.meta_v5.cfo_measurement = params->cfo_measurement;
++	header->u.meta_v5.rx_start_ts = params->rx_start_ts;
++	memcpy(header->u.meta_v5.peer_addr.su_peer_addr,
++	       params->peer_mac_addr, ETH_ALEN);
++	memcpy(header->u.meta_v5.chain_rssi, params->chain_rssi,
++	       sizeof(params->chain_rssi));
++	memcpy(header->u.meta_v5.chain_phase, params->chain_phase,
++	       sizeof(params->chain_phase));
++	memcpy(header->u.meta_v5.agc_gain, params->agc_gain,
++	       sizeof(params->agc_gain));
++}
++
++void ath11k_hw_qcn6122_fill_cfr_hdr_info(struct ath11k *ar,
++					 struct ath11k_csi_cfr_header *header,
++					 struct ath11k_cfr_peer_tx_param *params)
++{
++	header->cmn.cfr_metadata_version = ATH11K_CFR_META_VERSION_3;
++	header->cmn.cfr_data_version = ATH11K_CFR_DATA_VERSION_1;
++	header->cmn.cfr_metadata_len = ATH11K_CFR_METADATA_LEN;
++	/* TODO: can we add this chip_type to hw param table */
++	header->cmn.chip_type = ATH11K_CFR_RADIO_QCN6122;
++	header->u.meta_v3.status = FIELD_GET(WMI_CFR_PEER_CAPTURE_STATUS,
++					     params->status);
++	header->u.meta_v3.capture_bw = params->bandwidth;
++	header->u.meta_v3.phy_mode = ar->cfr_phymode;
++	header->u.meta_v3.prim20_chan = params->primary_20mhz_chan;
++	header->u.meta_v3.center_freq1 = params->band_center_freq1;
++	header->u.meta_v3.center_freq2 = params->band_center_freq2;
++
++	/* Currently CFR data is captured on ACK of a Qos NULL frame.
++	 * For 20 MHz, ACK is Legacy and for 40/80/160, ACK is DUP Legacy.
++	 */
++	header->u.meta_v3.capture_mode = params->bandwidth ?
++		ATH11K_CFR_CAPTURE_DUP_LEGACY_ACK : ATH11K_CFR_CAPTURE_LEGACY_ACK;
++	header->u.meta_v3.capture_type = params->capture_method;
++	header->u.meta_v3.num_rx_chain = ar->cfg_rx_chainmask;
++	header->u.meta_v3.sts_count = params->spatial_streams;
++	header->u.meta_v3.timestamp = params->timestamp_us;
++	memcpy(header->u.meta_v3.peer_addr.su_peer_addr,
++	       params->peer_mac_addr, ETH_ALEN);
++	memcpy(header->u.meta_v3.chain_rssi, params->chain_rssi,
++	       sizeof(params->chain_rssi));
++	memcpy(header->u.meta_v3.chain_phase, params->chain_phase,
++	       sizeof(params->chain_phase));
++}
++
+ const struct ath11k_hw_ops ipq8074_ops = {
+ 	.get_hw_mac_from_pdev_id = ath11k_hw_ipq8074_mac_from_pdev_id,
+ 	.wmi_init_config = ath11k_init_wmi_config_ipq8074,
+@@ -1202,6 +1274,7 @@ const struct ath11k_hw_ops ipq5018_ops =
+ 	.rx_desc_get_crypto_header = ath11k_hw_qcn9074_rx_desc_get_crypto_hdr,
+ 	.rx_desc_get_hal_ppdu_id = ath11k_hw_qcn9074_rx_desc_get_hal_mpdu_ppdu_id,
+ 	.rx_desc_get_ldpc_support = ath11k_hw_qcn9074_rx_desc_get_ldpc_support,
++	.fill_cfr_hdr_info = ath11k_hw_ipq5018_fill_cfr_hdr_info,
+  };
+ 
+ const struct ath11k_hw_ops qcn6122_ops = {
+@@ -1253,6 +1326,7 @@ const struct ath11k_hw_ops qcn6122_ops =
+ 	.rx_desc_get_crypto_header = ath11k_hw_qcn9074_rx_desc_get_crypto_hdr,
+ 	.rx_desc_get_hal_ppdu_id = ath11k_hw_qcn9074_rx_desc_get_hal_mpdu_ppdu_id,
+ 	.rx_desc_get_ldpc_support = ath11k_hw_qcn9074_rx_desc_get_ldpc_support,
++	.fill_cfr_hdr_info = ath11k_hw_qcn6122_fill_cfr_hdr_info,
+ };
+ 
+ #define ATH11K_TX_RING_MASK_0 0x1
+--- a/drivers/net/wireless/ath/ath11k/hw.h
++++ b/drivers/net/wireless/ath/ath11k/hw.h
+@@ -213,6 +213,8 @@ struct ath11k_hw_params {
+ 	bool wakeup_mhi;
+ 	u32 cfr_dma_hdr_size;
+ 	u32 cfr_num_stream_bufs;
++	u32 cfr_max_header_len_words;
++	u32 cfr_max_data_len;
+ 	u32 cfr_stream_buf_size;
+ 	u8 max_tx_ring;
+ 	bool reo_status_poll;

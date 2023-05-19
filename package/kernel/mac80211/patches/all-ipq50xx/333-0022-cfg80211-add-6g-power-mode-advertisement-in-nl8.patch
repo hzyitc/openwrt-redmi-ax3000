@@ -1,0 +1,92 @@
+From 3bc2a07134670d563af8a31acdb077fc855a255d Mon Sep 17 00:00:00 2001
+From: Aditya Kumar Singh <quic_adisi@quicinc.com>
+Date: Wed, 20 Oct 2021 18:10:49 +0530
+Subject: [PATCH] cfg80211: add 6g power mode advertisement in
+ NL80211_CMD_GET_REG command
+
+When the user space demands the regulatory domain from cfg80211
+via NL80211_CMD_GET_REG command, cfg80211 should advertise
+6G reg power mode as well. This patch adds the advertisement of
+6g power mode from reg rule in the nl msg.
+
+The user space will use these values if the configured channel is
+from 6G band.
+
+Also, the user space advertises the 6g reg power mode during set
+channel command for AP and durint NL80211_CMD_SET_INTERFACE
+command for client. cfg80211 should store the value if present from
+the nl msg for future use. This patch gets the value from
+NL80211_ATTR_6G_REG_POWER_MODE attribute and stores it in wdev.
+
+Signed-off-by: Aditya Kumar Singh <quic_adisi@quicinc.com>
+---
+ include/uapi/linux/nl80211.h |  3 +++
+ net/wireless/nl80211.c       | 12 +++++++++++-
+ 2 files changed, 14 insertions(+), 1 deletion(-)
+
+--- a/include/uapi/linux/nl80211.h
++++ b/include/uapi/linux/nl80211.h
+@@ -4070,6 +4070,7 @@ enum nl80211_reg_type {
+  *	If not present or 0 default CAC time will be used.
+  * @NL80211_ATTR_POWER_RULE_PSD: power spectral density (in dBm).
+  *	This could be negative.
++ * @NL80211_ATTR_REG_POWER_MODE: the regulatory power mode for 6G rules
+  * @NL80211_REG_RULE_ATTR_MAX: highest regulatory rule attribute number
+  *	currently defined
+  * @__NL80211_REG_RULE_ATTR_AFTER_LAST: internal use
+@@ -4089,6 +4090,8 @@ enum nl80211_reg_rule_attr {
+ 
+ 	NL80211_ATTR_POWER_RULE_PSD,
+ 
++	NL80211_ATTR_REG_POWER_MODE,
++
+ 	/* keep last */
+ 	__NL80211_REG_RULE_ATTR_AFTER_LAST,
+ 	NL80211_REG_RULE_ATTR_MAX = __NL80211_REG_RULE_ATTR_AFTER_LAST - 1
+--- a/net/wireless/nl80211.c
++++ b/net/wireless/nl80211.c
+@@ -3230,6 +3230,15 @@ static int __nl80211_set_channel(struct
+ 		result = -EINVAL;
+ 	}
+ 
++	/* Userspace might advertise the 6G power mode (AP). Just parse and store
++	 * it in wdev. No immediate action required. */
++	if (info->attrs[NL80211_ATTR_6G_REG_POWER_MODE]) {
++		wdev_lock(wdev);
++		wdev->reg_6g_power_mode =
++				nla_get_u8(info->attrs[NL80211_ATTR_6G_REG_POWER_MODE]);
++		wdev_unlock(wdev);
++	}
++
+ 	return result;
+ }
+ 
+@@ -3970,6 +3979,17 @@ static int nl80211_set_interface(struct
+ 		params.use_4addr = -1;
+ 	}
+ 
++	/* For 6GHz client, userspace could set the client type.
++	 * Just parse and store the value, no action required immediately.
++	 */
++	if (info->attrs[NL80211_ATTR_6G_REG_POWER_MODE]) {
++		struct wireless_dev *wdev = dev->ieee80211_ptr;
++		wdev_lock(wdev);
++		wdev->reg_6g_power_mode =
++			nla_get_u8(info->attrs[NL80211_ATTR_6G_REG_POWER_MODE]);
++		wdev_unlock(wdev);
++	}
++
+ 	err = nl80211_parse_mon_options(rdev, ntype, info, &params);
+ 	if (err < 0)
+ 		return err;
+@@ -7856,7 +7876,9 @@ static int nl80211_put_regdom(const stru
+ 		    nla_put_u32(msg, NL80211_ATTR_POWER_RULE_MAX_EIRP,
+ 				power_rule->max_eirp) ||
+ 		    nla_put_u32(msg, NL80211_ATTR_DFS_CAC_TIME,
+-				reg_rule->dfs_cac_ms))
++				reg_rule->dfs_cac_ms) ||
++		    nla_put_u8(msg, NL80211_ATTR_REG_POWER_MODE,
++			       reg_rule->mode))
+ 			goto nla_put_failure;
+ 
+ 		if ((reg_rule->flags & NL80211_RRF_PSD) &&

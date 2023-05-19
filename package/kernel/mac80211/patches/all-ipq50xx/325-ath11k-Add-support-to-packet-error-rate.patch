@@ -1,0 +1,215 @@
+From 2af860e67ee8a3d28c747b2d3b5b0708532672e0 Mon Sep 17 00:00:00 2001
+From: Hari Chandrakanthan <haric@codeaurora.org>
+Date: Mon, 13 Sep 2021 20:56:22 +0530
+Subject: [PATCH] ath11k : Add support to packet error rate
+
+cmd to read PER :
+cat /sys/kernel/debug/ieee80211/phyX/netdev\:wlanX/stations/xx\:
+xx\:xx\:xx\:xx\:xx/htt_comm_stats
+
+cmd to reset PER :
+echo 1 > /sys/kernel/debug/ieee80211/phyX/netdev\:wlanX/stations/xx\:
+xx\:xx\:xx\:xx\:xx/htt_comm_stats
+
+sample log :
+root@OpenWrt:/# cat /sys/kernel/debug/ieee80211/phy0/netdev\:wlan0/stations/8c\:
+fd\:f0\:22\:0f\:5e/htt_comm_stats
+tx_pwr[0]    : 22
+tx_pwr[1]    : 0
+tx_pwr[2]    : 0
+tx_pwr[3]    : 0
+tx_pwr[4]    : 0
+tx_pwr[5]    : 0
+tx_pwr[6]    : 0
+tx_pwr[7]    : 0
+fail_pkts    : 41
+succ_pkts    : 120
+PER          : 4
+
+Signed-off-by: Hari Chandrakanthan <haric@codeaurora.org>
+---
+ drivers/net/wireless/ath/ath11k/core.h        |  8 ++++++
+ drivers/net/wireless/ath/ath11k/debugfs_sta.c | 41 +++++++++++++++++++++++++--
+ drivers/net/wireless/ath/ath11k/dp_rx.c       |  6 ++++
+ drivers/net/wireless/ath/ath11k/dp_tx.c       |  8 ++++++
+ drivers/net/wireless/ath/ath11k/dp_tx.h       | 17 +++++++++++
+ drivers/net/wireless/ath/ath11k/mac.c         |  2 ++
+ 6 files changed, 80 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/wireless/ath/ath11k/core.h b/drivers/net/wireless/ath/ath11k/core.h
+index 34074d5..89bee8e 100644
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -448,6 +448,8 @@ struct ath11k_driver_rx_pkts_flow {
+ 	atomic_t pkts_out;
+ };
+ 
++DECLARE_EWMA(sta_per, 8, 16)
++
+ struct ath11k_sta {
+ 	struct ath11k_vif *arvif;
+ 
+@@ -492,6 +494,12 @@ struct ath11k_sta {
+ 	u8 tx_pwr_multiplier;
+ 	u8 chain_enable_bits;
+ 	u32 tx_pwr[HTT_PPDU_STATS_USER_CMN_TX_PWR_ARR_SIZE];
++	struct ewma_sta_per per;
++	u64 fail_pkts;
++	u64 succ_pkts;
++	/* pkt count for packet error rate computation*/
++	u32 per_fail_pkts;
++	u32 per_succ_pkts;
+ #ifdef CPTCFG_ATH11K_CFR
+ 	struct ath11k_per_peer_cfr_capture cfr_capture;
+ #endif
+diff --git a/drivers/net/wireless/ath/ath11k/debugfs_sta.c b/drivers/net/wireless/ath/ath11k/debugfs_sta.c
+index 3db4d60..5db8c6f 100644
+--- a/drivers/net/wireless/ath/ath11k/debugfs_sta.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs_sta.c
+@@ -1573,16 +1573,53 @@ static ssize_t ath11k_dbg_sta_read_htt_comm_stats(struct file *file,
+ 		} else
+ 			tx_pwr = 0;
+ 		len += scnprintf(buf + len, sizeof(buf) - len,
+-				 "tx_pwr[%d] : %d\n", i, tx_pwr);
++				 "tx_pwr[%d]    : %d\n", i, tx_pwr);
+ 	}
++	len += scnprintf(buf + len, sizeof(buf) - len, "fail_pkts    : %llu\n",
++			 arsta->fail_pkts);
++	len += scnprintf(buf + len, sizeof(buf) - len, "succ_pkts    : %llu\n",
++			 arsta->succ_pkts);
++	len += scnprintf(buf + len, sizeof(buf) - len, "PER          : %lu\n",
++			 ewma_sta_per_read(&arsta->per));
++
+ 	spin_unlock_bh(&ar->ab->base_lock);
+ 	mutex_unlock(&ar->conf_mutex);
+ 
+ 	return simple_read_from_buffer(user_buf, count, ppos, buf, len);
+ }
+ 
++static ssize_t ath11k_dbg_sta_write_htt_comm_stats(struct file *file,
++						   const char __user *user_buf,
++						   size_t count, loff_t *ppos)
++{
++	struct ieee80211_sta *sta = file->private_data;
++	struct ath11k_sta *arsta = (struct ath11k_sta *)sta->drv_priv;
++	struct ath11k *ar = arsta->arvif->ar;
++	struct ath11k_base *ab = ar->ab;
++	int ret;
++	u8 val;
++
++	ret = kstrtou8_from_user(user_buf, count, 0, &val);
++	if (ret || val != 1)
++		return -EINVAL;
++
++	mutex_lock(&ar->conf_mutex);
++	spin_lock_bh(&ab->base_lock);
++	arsta->fail_pkts = 0;
++	arsta->succ_pkts = 0;
++	arsta->per_fail_pkts = 0;
++	arsta->per_succ_pkts = 0;
++	ewma_sta_per_init(&arsta->per);
++	ewma_sta_per_add(&arsta->per, 1);
++	spin_unlock_bh(&ab->base_lock);
++	mutex_unlock(&ar->conf_mutex);
++
++	return count;
++}
++
+ static const struct file_operations fops_htt_comm_stats = {
+ 	.read = ath11k_dbg_sta_read_htt_comm_stats,
++	.write = ath11k_dbg_sta_write_htt_comm_stats,
+ 	.open = simple_open,
+ 	.owner = THIS_MODULE,
+ 	.llseek = default_llseek,
+@@ -1646,5 +1683,5 @@ void ath11k_debugfs_sta_op_add(struct ieee80211_hw *hw, struct ieee80211_vif *vi
+ 		    ar->ab->wmi_ab.svc_map))
+ 		debugfs_create_file("config_nss", 0600, dir, sta,
+ 				    &fops_config_num_spatial_strm);
+-	debugfs_create_file("htt_comm_stats", 0400, dir, sta, &fops_htt_comm_stats);
++	debugfs_create_file("htt_comm_stats", 0600, dir, sta, &fops_htt_comm_stats);
+ }
+diff --git a/drivers/net/wireless/ath/ath11k/dp_rx.c b/drivers/net/wireless/ath/ath11k/dp_rx.c
+index 3c85b33..ae859ef 100644
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -1672,6 +1672,12 @@ ath11k_update_per_peer_tx_stats(struct ath11k *ar,
+ 		peer_stats->mu_grpid = mu_grpid;
+ 		peer_stats->mu_pos   = mu_pos;
+ 		peer_stats->ru_tones = arsta->txrate.he_ru_alloc;
++		arsta->succ_pkts  += succ_pkts;
++		arsta->per_succ_pkts += succ_pkts;
++		if(arsta->per_fail_pkts + arsta->per_succ_pkts >=
++		   ATH11K_NUM_PKTS_THRSHLD_FOR_PER)
++			ath11k_sta_stats_update_per(arsta);
++
+ 		if (unlikely(ath11k_debugfs_is_extd_tx_stats_enabled(ar)))
+ 			ath11k_debugfs_sta_add_tx_stats(arsta, peer_stats, rate_idx);
+ 	}
+diff --git a/drivers/net/wireless/ath/ath11k/dp_tx.c b/drivers/net/wireless/ath/ath11k/dp_tx.c
+index 7392284..03f5b26 100644
+--- a/drivers/net/wireless/ath/ath11k/dp_tx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_tx.c
+@@ -647,6 +647,14 @@ static void ath11k_dp_tx_complete_msdu(struct ath11k *ar,
+ 	rate = arsta->last_txrate;
+ 	status.rate = &rate;
+ 
++	if (ts->status != HAL_WBM_TQM_REL_REASON_FRAME_ACKED) {
++		arsta->fail_pkts += 1;
++		arsta->per_fail_pkts += 1;
++		if(arsta->per_fail_pkts + arsta->per_succ_pkts >=
++		   ATH11K_NUM_PKTS_THRSHLD_FOR_PER)
++			ath11k_sta_stats_update_per(arsta);
++	}
++
+ 	if (unlikely(ath11k_debugfs_is_extd_tx_stats_enabled(ar))) {
+ 		if(arsta->wbm_tx_stats && wbm_status < HAL_WBM_REL_HTT_TX_COMP_STATUS_MAX)
+ 			arsta->wbm_tx_stats->wbm_tx_comp_stats[wbm_status]++;
+diff --git a/drivers/net/wireless/ath/ath11k/dp_tx.h b/drivers/net/wireless/ath/ath11k/dp_tx.h
+index 9635a4a..c41898a 100644
+--- a/drivers/net/wireless/ath/ath11k/dp_tx.h
++++ b/drivers/net/wireless/ath/ath11k/dp_tx.h
+@@ -9,6 +9,9 @@
+ #include "core.h"
+ #include "hal_tx.h"
+ 
++#define ATH11K_NUM_PKTS_THRSHLD_FOR_PER  50
++#define ATH11K_GET_PERCENTAGE(value, total_value) (((value)*100)/(total_value))
++
+ struct ath11k_dp_htt_wbm_tx_status {
+ 	u32 msdu_id;
+ 	bool acked;
+@@ -239,4 +242,18 @@ ath11k_dp_tx_get_encap_type(struct ath11k_vif *arvif, struct sk_buff *skb);
+ 
+ int ath11k_dp_tx_htt_rx_full_mon_setup(struct ath11k_base *ab, int mac_id,
+ 				       bool config);
++
++static inline void ath11k_sta_stats_update_per(struct ath11k_sta *arsta) {
++	int per;
++
++	if(!arsta)
++		return;
++
++	per = ATH11K_GET_PERCENTAGE(arsta->per_fail_pkts,
++				    arsta->per_fail_pkts + arsta->per_succ_pkts);
++	ewma_sta_per_add(&arsta->per, per);
++	arsta->per_fail_pkts = 0;
++	arsta->per_succ_pkts = 0;
++}
++
+ #endif
+diff --git a/drivers/net/wireless/ath/ath11k/mac.c b/drivers/net/wireless/ath/ath11k/mac.c
+index 88dc960..a5f05ae 100644
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -5029,6 +5029,8 @@ static int ath11k_mac_station_add(struct ath11k *ar,
+ 		}
+ 	}
+ 
++	ewma_sta_per_init(&arsta->per);
++	ewma_sta_per_add(&arsta->per, 1);
+ 	return 0;
+ 
+ free_tx_stats:
+-- 
+2.7.4
+

@@ -1,0 +1,54 @@
+From 39d661836522d57ac23280d3e97c208a5fdd8396 Mon Sep 17 00:00:00 2001
+From: Venkateswara Naralasetty <vnaralas@codeaurora.org>
+Date: Tue, 3 Aug 2021 17:33:23 +0530
+Subject: [PATCH] ath11k: fix NULL pointer dereference during device recovery
+
+This patch fix the following kernel NULL pointer dereference
+during recovery,
+
+[  269.619116] --- cut here ---
+[  269.642278] Unable to handle kernel NULL pointer dereference at virtual address 00000080
+[  269.667365] pgd = 84e9e949
+[  269.699907] [00000080] *pgd=00000000
+[  269.713335] Internal error: Oops: 5 [#1] PREEMPT SMP ARM
+[  269.736591] Modules linked in: ecm xt_connlimit nf_conncount iptable_nat ath11k_ahb xt_state xt_nat xt_helper xt_conntrack xt_connmS
+[  269.949325] CPU: 1 PID: 602 Comm: kworker/u4:5 Not tainted 5.4.89 #0
+[  269.949328] Hardware name: Generic DT based system
+[  269.949447] Workqueue: ath11k_wq ath11k_core_restart [ath11k]
+[  269.973915] PC is at down_write+0x8/0x4c
+[  269.973925] LR is at debugfs_remove+0x24/0x60
+[  269.973929] pc : [<808b93d4>]    lr : [<8054b6f0>]    psr: 80000013
+[  269.973939] sp : ba87bed8  ip : 3dbbe000  fp : b7ca0018
+
+[  270.038174] [<808b93d4>] (down_write) from [<8054b6f0>] (debugfs_remove+0x24/0x60)
+[  270.038294] [<8054b6f0>] (debugfs_remove) from [<7fa6af8c>] (ath11k_spectral_deinit+0x3c/0xcc [ath11k])
+[  270.042255] ath11k c000000.wifi: src srng id 136 hp 510, reap_hp 510, cur tp 0, cached tp 0 last tp 0 napi processed before 246700ms
+[  270.046689] [<7fa6af8c>] (ath11k_spectral_deinit [ath11k]) from [<7fa1b6f4>] (ath11k_core_restart+0x1cc/0x3c8 [ath11k])
+[  270.052833] pgd = 84e9e949
+[  270.057798] [<7fa1b6f4>] (ath11k_core_restart [ath11k]) from [<80330528>] (process_one_work+0x1dc/0x314)
+[  270.057817] [<80330528>] (process_one_work) from [<803318bc>] (worker_thread+0x2bc/0x40c)
+[  270.078076] [00000080] *pgd=00000000
+[  270.084077] [<803318bc>] (worker_thread) from [<80335f74>] (kthread+0x164/0x180)
+[  270.084091] [<80335f74>] (kthread) from [<803010e0>] (ret_from_fork+0x14/0x34)
+
+Signed-off-by: Venkateswara Naralasetty <vnaralas@codeaurora.org>
+---
+ drivers/net/wireless/ath/ath11k/core.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -1242,11 +1242,11 @@ static int ath11k_core_reconfigure_on_cr
+ 	ath11k_nss_teardown(ab);
+ 	ab->nss.enabled = false;
+ 
++	ath11k_cfr_deinit(ab);
++	ath11k_spectral_deinit(ab);
+ 	ath11k_thermal_unregister(ab);
+ 	ath11k_hif_irq_disable(ab);
+ 	ath11k_dp_pdev_free(ab);
+-	ath11k_spectral_deinit(ab);
+-	ath11k_cfr_deinit(ab);
+ 	ath11k_hif_stop(ab);
+ 	ath11k_wmi_detach(ab);
+ 	ath11k_dp_pdev_reo_cleanup(ab);

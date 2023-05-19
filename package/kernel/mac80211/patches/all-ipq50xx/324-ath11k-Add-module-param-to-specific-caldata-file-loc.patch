@@ -1,0 +1,92 @@
+From 08429015b6cb67b08075fa7cf330157612e87b1b Mon Sep 17 00:00:00 2001
+From: Tamizh Chelvam <tamizhr@codeaurora.org>
+Date: Tue, 8 Jun 2021 11:08:01 +0530
+Subject: [PATCH] ath11k: Add module param to specific caldata file location
+
+Add support to specify caldata file load path dynamically
+through module param.
+
+ex : 
+
+insmod ./ath11k.ko ath11k_caldata_bin_path="ath11k"
+
+Sample output with dbg print:
+
+ath11k_qmi_load_caldata : PATH is ath11k/caldata.bin
+ath11k c000000.wifi: qmi caldata downloaded: type: 2
+
+Signed-off-by: Tamizh Chelvam <tamizhr@codeaurora.org>
+---
+ drivers/net/wireless/ath/ath11k/core.c |  6 ++++++
+ drivers/net/wireless/ath/ath11k/qmi.c  | 28 +++++++++++++++++++++++++++-
+ drivers/net/wireless/ath/ath11k/qmi.h  |  1 +
+ 3 files changed, 34 insertions(+), 1 deletion(-)
+
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -51,6 +51,12 @@ MODULE_PARM_DESC(skip_radio_bmap, "Bitma
+ unsigned int ath11k_skip_radio;
+ EXPORT_SYMBOL(ath11k_skip_radio);
+ 
++char *ath11k_caldata_bin_path = NULL;
++EXPORT_SYMBOL(ath11k_caldata_bin_path);
++module_param(ath11k_caldata_bin_path, charp, 0644);
++MODULE_PARM_DESC(ath11k_caldata_bin_path,
++		"Caldata bin path for loading");
++
+ wait_queue_head_t ath11k_radio_prb_wq;
+ EXPORT_SYMBOL(ath11k_radio_prb_wq);
+ 
+--- a/drivers/net/wireless/ath/ath11k/qmi.c
++++ b/drivers/net/wireless/ath/ath11k/qmi.c
+@@ -3161,6 +3161,28 @@ out_req:
+ 	return ret;
+ }
+ 
++static const struct firmware *ath11k_qmi_load_caldata(struct ath11k_base *ab,
++						      const char *file)
++{
++	const struct firmware *fw;
++	char path[100];
++	int ret;
++
++	if (file == NULL)
++		return ERR_PTR(-ENOENT);
++
++	snprintf(path, sizeof(path), "%s/%s", ath11k_caldata_bin_path, file);
++
++	ret = firmware_request_nowarn(&fw, path, ab->dev);
++	if (ret)
++		return ERR_PTR(ret);
++
++	ath11k_dbg(ab, ATH11K_DBG_BOOT, "boot firmware request %s size %zu\n",
++		   path, fw->size);
++
++	return fw;
++}
++
+ static int ath11k_qmi_load_bdf_qmi(struct ath11k_base *ab)
+ {
+ 	char filename[ATH11K_QMI_MAX_BDF_FILE_NAME_SIZE];
+@@ -3214,7 +3236,10 @@ static int ath11k_qmi_load_bdf_qmi(struc
+ 	}
+ 
+ 	file_type = ATH11K_QMI_FILE_TYPE_CALDATA;
+-	fw_entry = ath11k_core_firmware_request(ab, filename);
++	if (ath11k_caldata_bin_path)
++		fw_entry = ath11k_qmi_load_caldata(ab, filename);
++	else
++		fw_entry = ath11k_core_firmware_request(ab, filename);
+ 	if (IS_ERR(fw_entry)) {
+ 		ret = PTR_ERR(fw_entry);
+ 		ath11k_warn(ab,
+--- a/drivers/net/wireless/ath/ath11k/qmi.h
++++ b/drivers/net/wireless/ath/ath11k/qmi.h
+@@ -67,6 +67,7 @@
+ 
+ struct ath11k_base;
+ extern unsigned int ath11k_host_ddr_addr;
++extern char *ath11k_caldata_bin_path;
+ 
+ enum ath11k_target_mem_mode {
+ 	ATH11K_QMI_TARGET_MEM_MODE_DEFAULT = 0,

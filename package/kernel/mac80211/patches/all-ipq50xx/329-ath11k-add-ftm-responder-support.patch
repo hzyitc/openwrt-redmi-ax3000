@@ -1,0 +1,76 @@
+From a57eaf9c5198ae824d0c86f2f8a934cf08f56103 Mon Sep 17 00:00:00 2001
+From: Sowmiya Sree Elavalagan <ssreeela@codeaurora.org>
+Date: Fri, 24 Sep 2021 18:22:20 +0530
+Subject: [PATCH] ath11k: Add ftm responder support
+
+Fine Timing Measurement support is used to measure round
+trip time between two nodes. Currently ath11k support
+ftm responder in ap mode. This is completely fw offloaded.
+Ath11k enables and disables ftm responder based on user
+configuration, also added support for advertising the same
+in ext caps.
+
+Signed-off-by: Sowmiya Sree Elavalagan <ssreeela@codeaurora.org>
+---
+ drivers/net/wireless/ath/ath11k/core.h |  1 +
+ drivers/net/wireless/ath/ath11k/mac.c  | 18 +++++++++++++++++-
+ drivers/net/wireless/ath/ath11k/wmi.h  |  1 +
+ 3 files changed, 19 insertions(+), 1 deletion(-)
+
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -281,6 +281,7 @@ struct ath11k_vif {
+ 
+ 	bool is_started;
+ 	bool is_up;
++	bool ftm_responder;
+ 	bool spectral_enabled;
+ 	u32 aid;
+ 	u8 bssid[ETH_ALEN];
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -3293,10 +3293,23 @@ static void ath11k_mac_op_bss_info_chang
+ 	u16 bitrate;
+ 	int ret = 0;
+ 	u8 rateidx;
+-	u32 rate;
++	u32 rate, param;
+ 
+ 	mutex_lock(&ar->conf_mutex);
+ 
++	if (changed & BSS_CHANGED_FTM_RESPONDER &&
++	    arvif->ftm_responder != info->ftm_responder &&
++	    (vif->type == NL80211_IFTYPE_AP ||
++	     vif->type == NL80211_IFTYPE_MESH_POINT)) {
++		arvif->ftm_responder = info->ftm_responder;
++		param = WMI_VDEV_PARAM_ENABLE_DISABLE_RTT_RESPONDER_ROLE;
++		ret =  ath11k_wmi_vdev_set_param_cmd(ar, arvif->vdev_id, param,
++						     arvif->ftm_responder);
++		if (ret)
++			ath11k_warn(ar->ab, "Failed to set ftm responder %i: %d\n",
++				    arvif->vdev_id, ret);
++	}
++
+ 	if (changed & BSS_CHANGED_BEACON_INT) {
+ 		arvif->beacon_interval = info->beacon_int;
+ 
+@@ -9442,6 +9455,9 @@ static int __ath11k_mac_register(struct
+ 				      NL80211_EXT_FEATURE_UNSOL_BCAST_PROBE_RESP);
+ 	}
+ 
++	wiphy_ext_feature_set(ar->hw->wiphy,
++			      NL80211_EXT_FEATURE_ENABLE_FTM_RESPONDER);
++
+ 	ath11k_reg_init(ar);
+ 	ath11k_vendor_register(ar);
+ 
+--- a/drivers/net/wireless/ath/ath11k/wmi.h
++++ b/drivers/net/wireless/ath/ath11k/wmi.h
+@@ -1099,6 +1099,7 @@ enum wmi_tlv_vdev_param {
+ 	WMI_VDEV_PARAM_ENABLE_BCAST_PROBE_RESPONSE,
+ 	WMI_VDEV_PARAM_FILS_MAX_CHANNEL_GUARD_TIME,
+ 	WMI_VDEV_PARAM_HE_LTF = 0x74,
++	WMI_VDEV_PARAM_ENABLE_DISABLE_RTT_RESPONDER_ROLE = 0x7d,
+ 	WMI_VDEV_PARAM_BA_MODE = 0x7e,
+ 	WMI_VDEV_PARAM_AUTORATE_MISC_CFG = 0x80,
+ 	WMI_VDEV_PARAM_SET_HE_SOUNDING_MODE = 0x87,

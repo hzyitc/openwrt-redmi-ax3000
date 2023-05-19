@@ -1,0 +1,175 @@
+From c89d05ff62024a16cd4cbf8498b89e4180a1e42c Mon Sep 17 00:00:00 2001
+From: Anilkumar Kolli <quic_akolli@quicinc.com>
+Date: Tue, 16 Nov 2021 20:29:56 +0530
+Subject: [PATCH] ath11k: Add Support to send dynamic pageable memory to FW
+
+Reserve additional 8MB of memory for dynamic pageable memory for QCN9074
+and add changes to send dynamic pageable region over QMI to FW.
+
+Dynamic paging was allocated by coretech driver, it was 8 MB fixed size.
+With Dynamic paging, in firmware mode-0 it is 8 MB and mode-2 it is 4 MB.
+
+Signed-off-by: Anilkumar Kolli <quic_akolli@quicinc.com>
+---
+ drivers/net/wireless/ath/ath11k/core.h     |  2 ++
+ drivers/net/wireless/ath/ath11k/coredump.c | 31 ++++++++++++++++++++++----
+ drivers/net/wireless/ath/ath11k/qmi.c      | 35 ++++++++++++++++++++++++++----
+ drivers/net/wireless/ath/ath11k/qmi.h      |  1 +
+ 4 files changed, 61 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/net/wireless/ath/ath11k/core.h b/drivers/net/wireless/ath/ath11k/core.h
+index 5089c363ce16..dea725da5c30 100644
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -1323,6 +1323,8 @@ int ath11k_core_suspend(struct ath11k_base *ab);
+ void ath11k_core_dump_bp_stats(struct ath11k_base *ab);
+ void ath11k_coredump_qdss_dump(struct ath11k_base *ab,
+ 			       struct ath11k_qmi_event_qdss_trace_save_data *event_data);
++int ath11k_coredump_mhi_update_bhie_table(struct ath11k_base *ab, void *va,
++					  phys_addr_t pa, size_t size);
+ const struct firmware *ath11k_core_firmware_request(struct ath11k_base *ab,
+ 						    const char *filename);
+ 
+diff --git a/drivers/net/wireless/ath/ath11k/coredump.c b/drivers/net/wireless/ath/ath11k/coredump.c
+index b3cabd16f0cd..db8c56817532 100644
+--- a/drivers/net/wireless/ath/ath11k/coredump.c
++++ b/drivers/net/wireless/ath/ath11k/coredump.c
+@@ -186,7 +186,8 @@ void ath11k_coredump_download_rddm(struct ath11k_base *ab)
+ 	for (i = 0; i < ab->qmi.mem_seg_count; i++) {
+ 		if (ab->qmi.target_mem[i].type == HOST_DDR_REGION_TYPE ||
+ 		    (ab->qmi.target_mem[i].type == CALDB_MEM_REGION_TYPE && ab->enable_cold_boot_cal && ab->hw_params.cold_boot_calib) ||
+-			ab->qmi.target_mem[i].type == M3_DUMP_REGION_TYPE)
++			ab->qmi.target_mem[i].type == M3_DUMP_REGION_TYPE ||
++			ab->qmi.target_mem[i].type == PAGEABLE_MEM_TYPE)
+ 			rem_seg_cnt++;
+ 	}
+ 
+@@ -201,6 +202,8 @@ void ath11k_coredump_download_rddm(struct ath11k_base *ab)
+ 		ath11k_warn(ab, "fail to alloc memory for rddm\n");
+ 
+ 	for (i = 0; i < fw_img->entries ; i++) {
++		if (!fw_img->mhi_buf[i].buf)
++			continue;
+ 		seg_sz = fw_img->mhi_buf[i].len;
+ 		seg_info->len = PAGE_ALIGN(seg_sz);
+ 		seg_info->addr = fw_img->mhi_buf[i].dma_addr;
+@@ -213,12 +216,12 @@ void ath11k_coredump_download_rddm(struct ath11k_base *ab)
+ 	}
+ 
+ 	for (i = 0; i < rddm_img->entries; i++) {
++		if (!rddm_img->mhi_buf[i].buf)
++			continue;
+ 		seg_sz = rddm_img->mhi_buf[i].len;
+ 		seg_info->len = PAGE_ALIGN(seg_sz);
+ 		seg_info->addr = rddm_img->mhi_buf[i].dma_addr;
+ 		seg_info->vaddr = rddm_img->mhi_buf[i].buf;
+-		ath11k_info(ab, "seg vaddr is %px len is 0x%x type %d\n",
+-			    seg_info->vaddr, seg_info->len, seg_info->type);
+ 		seg_info->type = ATH11K_FW_CRASH_RDDM_DATA;
+ 		ath11k_info(ab, "seg vaddr is %px len is 0x%x type %d\n",
+ 			    seg_info->vaddr, seg_info->len, seg_info->type);
+@@ -249,7 +252,8 @@ void ath11k_coredump_download_rddm(struct ath11k_base *ab)
+ 	}
+ 
+ 	for (i = 0; i < ab->qmi.mem_seg_count; i++) {
+-		if (ab->qmi.target_mem[i].type == CALDB_MEM_REGION_TYPE && ab->enable_cold_boot_cal && ab->hw_params.cold_boot_calib) {
++		if ((ab->qmi.target_mem[i].type == CALDB_MEM_REGION_TYPE &&
++		     ab->enable_cold_boot_cal && ab->hw_params.cold_boot_calib)) {
+ 			seg_info->len = ab->qmi.target_mem[i].size;
+ 			seg_info->addr = ab->qmi.target_mem[i].paddr;
+ 			seg_info->vaddr = ab->qmi.target_mem[i].vaddr;
+@@ -369,3 +373,22 @@ out:
+ 	vfree(segment);
+ 	vfree(dump);
+ }
++
++int ath11k_coredump_mhi_update_bhie_table(struct ath11k_base *ab, void *va,
++					  phys_addr_t pa, size_t size)
++{
++
++	struct ath11k_pci *ar_pci = (struct ath11k_pci *)ab->drv_priv;
++	struct mhi_controller *mhi_ctrl = ar_pci->mhi_ctrl;
++	int ret;
++
++	/* Attach Pageable region to MHI buffer so that it is
++	 * included as part of pageable region in dumps
++	 */
++	ret = mhi_update_bhie_table_for_dyn_paging(mhi_ctrl, va, pa, size);
++	if (ret)
++		ath11k_dbg(ab, ATH11K_DBG_QMI,
++				"failed to add Dynamic Paging region to MHI Buffer table %d\n", ret);
++
++	return ret;
++}
+diff --git a/drivers/net/wireless/ath/ath11k/qmi.c b/drivers/net/wireless/ath/ath11k/qmi.c
+index 8c73a044f448..ee03b11942d5 100644
+--- a/drivers/net/wireless/ath/ath11k/qmi.c
++++ b/drivers/net/wireless/ath/ath11k/qmi.c
+@@ -2780,14 +2780,15 @@ static int ath11k_qmi_alloc_target_mem_chunk(struct ath11k_base *ab)
+ 	return 0;
+ }
+ 
+-#define ATH11K_HOST_DDR_M3_OFFSET	0x2D00000
+-#define ATH11K_HOST_DDR_QDSS_OFFSET	0x2E00000
+-#define ATH11K_HOST_DDR_CALDB_OFFSET	0x2F00000
++#define ATH11K_HOST_DDR_M3_OFFSET	0x2300000
++#define ATH11K_HOST_DDR_QDSS_OFFSET	0x2400000
++#define ATH11K_HOST_DDR_CALDB_OFFSET	0x2500000
++#define ATH11K_HOST_DDR_PAGEABLE_OFFSET	0x2D00000
+ 
+ static int ath11k_qmi_assign_target_mem_chunk(struct ath11k_base *ab)
+ {
+ 	struct device *dev = ab->dev;
+-	int i, idx;
++	int i, idx, ret;
+ 	u32 addr = 0;
+ 	u32 location[3];
+ 
+@@ -2875,6 +2876,32 @@ static int ath11k_qmi_assign_target_mem_chunk(struct ath11k_base *ab)
+ 							ab->qmi.target_mem[i].size);
+ 			idx++;
+ 			break;
++		case PAGEABLE_MEM_TYPE:
++			if (ath11k_host_ddr_addr) {
++				addr = ath11k_host_ddr_addr +
++					ATH11K_HOST_DDR_PAGEABLE_OFFSET;
++			} else if (of_property_read_u32(dev->of_node,
++						"pageable-addr", &addr)) {
++				ath11k_dbg(ab, ATH11K_DBG_QMI,
++						"pageable-addr is not in dt\n");
++			}
++			ab->qmi.target_mem[idx].paddr =  (phys_addr_t)addr;
++			ab->qmi.target_mem[idx].vaddr =
++					ioremap(ab->qmi.target_mem[idx].paddr,
++							ab->qmi.target_mem[i].size);
++			ab->qmi.target_mem[idx].size = ab->qmi.target_mem[i].size;
++			ab->qmi.target_mem[idx].type = ab->qmi.target_mem[i].type;
++
++			ret = ath11k_coredump_mhi_update_bhie_table(ab,
++						ab->qmi.target_mem[idx].vaddr,
++						ab->qmi.target_mem[idx].paddr,
++						ab->qmi.target_mem[idx].size);
++			if (ret < 0)
++				ath11k_warn(ab, "qmi fail to update BHI table %d\n",
++					    ret);
++
++			idx++;
++			break;
+ 		default:
+ 			ath11k_warn(ab, "qmi ignore invalid mem req type %d\n",
+ 				    ab->qmi.target_mem[i].type);
+diff --git a/drivers/net/wireless/ath/ath11k/qmi.h b/drivers/net/wireless/ath/ath11k/qmi.h
+index 454b66c81074..522516b1f11b 100644
+--- a/drivers/net/wireless/ath/ath11k/qmi.h
++++ b/drivers/net/wireless/ath/ath11k/qmi.h
+@@ -270,6 +270,7 @@ struct qmi_wlanfw_qdss_trace_mode_resp_msg_v01 {
+ #define M3_DUMP_REGION_TYPE				0x3
+ #define CALDB_MEM_REGION_TYPE				0x4
+ #define QDSS_ETR_MEM_REGION_TYPE                        0x6
++#define PAGEABLE_MEM_TYPE 				0x9
+ #define QMI_MEM_REGION_TYPE				0
+ 
+ struct qmi_wlanfw_host_cap_req_msg_v01 {
+-- 
+2.7.4
+

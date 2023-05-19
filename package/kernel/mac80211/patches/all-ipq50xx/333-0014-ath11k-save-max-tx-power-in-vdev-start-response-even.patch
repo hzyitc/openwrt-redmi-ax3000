@@ -1,0 +1,66 @@
+From 270ef1eb351ba2dd7b83d92e4c08eaf12d639d01 Mon Sep 17 00:00:00 2001
+From: Wen Gong <quic_wgong@quicinc.com>
+Date: Wed, 20 Oct 2021 15:13:03 +0530
+Subject: [PATCH] ath11k: save max tx power in vdev start response event from
+ firmware
+
+Save the max tx power received in the vdev start response event from
+firmware. A subsequent patch will use this to calculate the final power
+value for WMI_VDEV_SET_TPC_POWER_CMDID.
+
+Signed-off-by: Wen Gong <quic_wgong@quicinc.com>
+Signed-off-by: Aditya Kumar Singh <quic_adisi@quicinc.com>
+---
+ drivers/net/wireless/ath/ath11k/core.h | 1 +
+ drivers/net/wireless/ath/ath11k/wmi.c  | 3 ++-
+ drivers/net/wireless/ath/ath11k/wmi.h  | 1 +
+ 3 files changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/wireless/ath/ath11k/core.h b/drivers/net/wireless/ath/ath11k/core.h
+index 47f885f..26268a8 100644
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -814,6 +814,7 @@ struct ath11k {
+ #endif
+ 	bool dfs_block_radar_events;
+ 	struct ath11k_thermal thermal;
++	s8 max_allowed_tx_power;
+ 	struct completion fw_mode_reset;
+ 	u8 ftm_msgref;
+ 	int ap_ps_enabled;
+diff --git a/drivers/net/wireless/ath/ath11k/wmi.c b/drivers/net/wireless/ath/ath11k/wmi.c
+index 44ed4b6..2ace82d 100644
+--- a/drivers/net/wireless/ath/ath11k/wmi.c
++++ b/drivers/net/wireless/ath/ath11k/wmi.c
+@@ -5326,6 +5326,7 @@ static int ath11k_pull_vdev_start_resp_tlv(struct ath11k_base *ab, struct sk_buf
+ 	vdev_rsp->mac_id = ev->mac_id;
+ 	vdev_rsp->cfgd_tx_streams = ev->cfgd_tx_streams;
+ 	vdev_rsp->cfgd_rx_streams = ev->cfgd_rx_streams;
++	vdev_rsp->max_allowed_tx_power = ev->max_allowed_tx_power;
+ 
+ 	kfree(tb);
+ 	return 0;
+@@ -7634,7 +7635,7 @@ static void ath11k_vdev_start_resp_event(struct ath11k_base *ab, struct sk_buff
+ 	}
+ 
+ 	ar->last_wmi_vdev_start_status = 0;
+-
++	ar->max_allowed_tx_power = vdev_start_resp.max_allowed_tx_power;
+ 	status = vdev_start_resp.status;
+ 
+ 	if (WARN_ON_ONCE(status)) {
+diff --git a/drivers/net/wireless/ath/ath11k/wmi.h b/drivers/net/wireless/ath/ath11k/wmi.h
+index 9116b4a..0e29d30 100644
+--- a/drivers/net/wireless/ath/ath11k/wmi.h
++++ b/drivers/net/wireless/ath/ath11k/wmi.h
+@@ -4391,6 +4391,7 @@ struct wmi_vdev_start_resp_event {
+ 	};
+ 	u32 cfgd_tx_streams;
+ 	u32 cfgd_rx_streams;
++	s32 max_allowed_tx_power;
+ } __packed;
+ 
+ /* VDEV start response status codes */
+-- 
+2.7.4
+

@@ -1,0 +1,56 @@
+From 8268dda48c8ee79e2fca857b5f16f8c2d2fa642e Mon Sep 17 00:00:00 2001
+From: Wen Gong <quic_wgong@quicinc.com>
+Date: Wed, 20 Oct 2021 15:57:16 +0530
+Subject: [PATCH] ath11k: send TPC power to firmware for 6G VDEV
+
+When STATION is connected to a 6 GHz AP, it has 2 way to configure
+the power limit to firmware. The first way is to send 2 wmi command
+WMI_PDEV_PARAM_TXPOWER_LIMIT2G/WMI_PDEV_PARAM_TXPOWER_LIMIT5G to
+firmware, the second way is to send WMI_VDEV_SET_TPC_POWER_CMDID to
+firmware which include more parameters for power control.
+
+The first way is disabled in previous patch
+"ath11k: discard BSS_CHANGED_TXPOWER when EXT_TPC_REG_SUPPORT for 6G".
+
+This patch is to prepare the parameter for wmi command
+WMI_VDEV_SET_TPC_POWER_CMDID and send the firmware after vdev start
+response success from firmware, it is for the second way of power
+control.
+
+Signed-off-by: Wen Gong <quic_wgong@quicinc.com>
+Signed-off-by: Aditya Kumar Singh <quic_adisi@quicinc.com>
+---
+ drivers/net/wireless/ath/ath11k/mac.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/drivers/net/wireless/ath/ath11k/mac.c b/drivers/net/wireless/ath/ath11k/mac.c
+index 68fb347..c140214 100644
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -7442,6 +7442,15 @@ ath11k_mac_vdev_start_restart(struct ath11k_vif *arvif,
+ 		return ret;
+ 	}
+ 
++	if (ar->supports_6ghz &&
++	    chandef->chan->band == NL80211_BAND_6GHZ &&
++	    (arvif->vdev_type == WMI_VDEV_TYPE_STA || arvif->vdev_type == WMI_VDEV_TYPE_AP) &&
++	    test_bit(WMI_TLV_SERVICE_EXT_TPC_REG_SUPPORT, ar->ab->wmi_ab.svc_map)) {
++		ath11k_mac_fill_reg_tpc_info(ar, arvif->vif, &arvif->chanctx);
++		ath11k_wmi_send_vdev_set_tpc_power(ar, arvif->vdev_id,
++						   &arvif->reg_tpc_info);
++	}
++
+ 	if (!restart)
+ 		ar->num_started_vdevs++;
+ 
+@@ -8310,6 +8319,7 @@ ath11k_mac_op_assign_vif_chanctx(struct ieee80211_hw *hw,
+ 		if (power_type == IEEE80211_REG_UNSET_AP)
+ 			power_type = IEEE80211_REG_LPI_AP;
+ 
++		arvif->chanctx = *ctx;
+ 		if (arvif->vdev_type == WMI_VDEV_TYPE_STA)
+ 			ath11k_mac_parse_tx_pwr_env(ar, vif, ctx);
+ 	}
+-- 
+2.7.4
+

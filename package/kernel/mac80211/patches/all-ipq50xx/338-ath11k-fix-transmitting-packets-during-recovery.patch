@@ -1,0 +1,56 @@
+From eb12d46e6044bb5062d8e0e96ca9b6996cbd5b83 Mon Sep 17 00:00:00 2001
+From: Aditya Kumar Singh <quic_adisi@quicinc.com>
+Date: Thu, 9 Dec 2021 17:47:27 +0530
+Subject: [PATCH] ath11k: fix transmitting packets during recovery
+
+Currently, the point where FW crash is asserted and point where
+FW recovers, if during this time any packets arrive from mac80211
+layer, ath11k_dp_tx() returns -ESHUTDOWN which leads to warning
+print
+  ath11k c000000.wifi: failed to transmit frame -108
+
+If there is any traffic running directly or in the backbone, this
+leads to flooding of the above print.
+
+Add logic to handle packets in ath11k_mac_op_tx() itself if driver
+is expecting recovery (ATH11K_FLAG_CRASH_FLUSH flag is set).
+
+Signed-off-by: Aditya Kumar Singh <quic_adisi@quicinc.com>
+---
+ drivers/net/wireless/ath/ath11k/dp_tx.c | 3 ---
+ drivers/net/wireless/ath/ath11k/mac.c   | 5 +++++
+ 2 files changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/wireless/ath/ath11k/dp_tx.c b/drivers/net/wireless/ath/ath11k/dp_tx.c
+index 77348d5..b8d9f94 100644
+--- a/drivers/net/wireless/ath/ath11k/dp_tx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_tx.c
+@@ -234,9 +234,6 @@ int ath11k_dp_tx(struct ath11k *ar, struct ath11k_vif *arvif,
+ 	u8 align_pad, htt_meta_size = 0, max_tx_ring, tcl_ring_id, ring_id;
+ 	u32 idr;
+ 
+-	if (unlikely(test_bit(ATH11K_FLAG_CRASH_FLUSH, &ar->ab->dev_flags)))
+-		return -ESHUTDOWN;
+-
+ 	if (unlikely(!(info->flags & IEEE80211_TX_CTL_HW_80211_ENCAP) &&
+ 	    !ieee80211_is_data(hdr->frame_control)))
+ 		return -ENOTSUPP;
+diff --git a/drivers/net/wireless/ath/ath11k/mac.c b/drivers/net/wireless/ath/ath11k/mac.c
+index 1dca674..6cf2b37 100644
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -6707,6 +6707,11 @@ static void ath11k_mac_op_tx(struct ieee80211_hw *hw,
+ 	bool noack = false;
+ 	int ret;
+ 
++	if (unlikely(test_bit(ATH11K_FLAG_CRASH_FLUSH, &ar->ab->dev_flags))) {
++		ieee80211_free_txskb(ar->hw, skb);
++		return;
++	}
++
+ 	memset(skb_cb, 0, sizeof(*skb_cb));
+ 	skb_cb->vif = vif;
+ 
+-- 
+2.7.4
+

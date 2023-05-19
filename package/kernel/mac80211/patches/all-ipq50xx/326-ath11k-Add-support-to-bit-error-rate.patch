@@ -1,0 +1,181 @@
+From 826adf094d3c7245944d0949f85cc9f23715d8dc Mon Sep 17 00:00:00 2001
+From: Hari Chandrakanthan <haric@codeaurora.org>
+Date: Mon, 13 Sep 2021 21:17:16 +0530
+Subject: [PATCH] ath11k : Add support to bit error rate
+
+cmd to read bit error rate :
+cat  /sys/kernel/debug/ieee80211/phyX/netdev\:wlanX/stations/xx\
+:xx\:xx\:xx\:xx\:cc/htt_comm_stats
+
+cmd to reset bit error rate :
+echo 1 >  /sys/kernel/debug/ieee80211/phyX/netdev\:wlanX/stations/xx\
+:xx\:xx\:xx\:xx\:cc/htt_comm_stats
+
+sample log:
+root@OpenWrt:/# cat /sys/kernel/debug/ieee80211/phy0/netdev\:wlan0/stations/8c\:
+fd\:f0\:22\:0f\:5e/htt_comm_stats
+tx_pwr[0]    : 22
+tx_pwr[1]    : 0
+tx_pwr[2]    : 0
+tx_pwr[3]    : 0
+tx_pwr[4]    : 0
+tx_pwr[5]    : 0
+tx_pwr[6]    : 0
+tx_pwr[7]    : 0
+fail_pkts    : 41
+succ_pkts    : 120
+PER          : 4
+fail_bytes   : 60314
+succ_bytes   : 177104
+BER          : 12
+
+Signed-off-by: Hari Chandrakanthan <haric@codeaurora.org>
+---
+ drivers/net/wireless/ath/ath11k/core.h        |  8 ++++++++
+ drivers/net/wireless/ath/ath11k/debugfs_sta.c | 13 ++++++++++++-
+ drivers/net/wireless/ath/ath11k/dp_rx.c       |  5 +++++
+ drivers/net/wireless/ath/ath11k/dp_tx.c       |  5 +++++
+ drivers/net/wireless/ath/ath11k/dp_tx.h       | 13 +++++++++++++
+ drivers/net/wireless/ath/ath11k/mac.c         |  2 ++
+ 6 files changed, 45 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/wireless/ath/ath11k/core.h b/drivers/net/wireless/ath/ath11k/core.h
+index 89bee8e..2775fa2 100644
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -412,6 +412,8 @@ struct ath11k_wbm_tx_stats {
+ 	u64 wbm_tx_comp_stats[HAL_WBM_REL_HTT_TX_COMP_STATUS_MAX];
+ };
+ 
++DECLARE_EWMA(sta_ber, 8, 16)
++
+ struct ath11k_htt_tx_stats {
+ 	struct ath11k_htt_data_stats stats[ATH11K_STATS_TYPE_MAX];
+ 	u64 tx_duration;
+@@ -500,6 +502,12 @@ struct ath11k_sta {
+ 	/* pkt count for packet error rate computation*/
+ 	u32 per_fail_pkts;
+ 	u32 per_succ_pkts;
++	struct ewma_sta_ber ber;
++	u64 succ_bytes;
++	u64 fail_bytes;
++	/*bytes count for bit error rate computation*/
++	u32 ber_succ_bytes;
++	u32 ber_fail_bytes;
+ #ifdef CPTCFG_ATH11K_CFR
+ 	struct ath11k_per_peer_cfr_capture cfr_capture;
+ #endif
+diff --git a/drivers/net/wireless/ath/ath11k/debugfs_sta.c b/drivers/net/wireless/ath/ath11k/debugfs_sta.c
+index 5db8c6f..6247df2 100644
+--- a/drivers/net/wireless/ath/ath11k/debugfs_sta.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs_sta.c
+@@ -1581,7 +1581,12 @@ static ssize_t ath11k_dbg_sta_read_htt_comm_stats(struct file *file,
+ 			 arsta->succ_pkts);
+ 	len += scnprintf(buf + len, sizeof(buf) - len, "PER          : %lu\n",
+ 			 ewma_sta_per_read(&arsta->per));
+-
++	len += scnprintf(buf + len, sizeof(buf) - len, "fail_bytes   : %llu\n",
++			 arsta->fail_bytes);
++	len += scnprintf(buf + len, sizeof(buf) - len, "succ_bytes   : %llu\n",
++			 arsta->succ_bytes);
++	len += scnprintf(buf + len, sizeof(buf) - len,
++			 "BER          : %lu\n", ewma_sta_ber_read(&arsta->ber));
+ 	spin_unlock_bh(&ar->ab->base_lock);
+ 	mutex_unlock(&ar->conf_mutex);
+ 
+@@ -1611,6 +1616,12 @@ static ssize_t ath11k_dbg_sta_write_htt_comm_stats(struct file *file,
+ 	arsta->per_succ_pkts = 0;
+ 	ewma_sta_per_init(&arsta->per);
+ 	ewma_sta_per_add(&arsta->per, 1);
++	ewma_sta_ber_init(&arsta->ber);
++	ewma_sta_ber_add(&arsta->ber, 1);
++	arsta->succ_bytes = 0;
++	arsta->fail_bytes = 0;
++	arsta->ber_succ_bytes = 0;
++	arsta->ber_fail_bytes = 0;
+ 	spin_unlock_bh(&ab->base_lock);
+ 	mutex_unlock(&ar->conf_mutex);
+ 
+diff --git a/drivers/net/wireless/ath/ath11k/dp_rx.c b/drivers/net/wireless/ath/ath11k/dp_rx.c
+index ae859ef..f147f9e 100644
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -1674,9 +1674,14 @@ ath11k_update_per_peer_tx_stats(struct ath11k *ar,
+ 		peer_stats->ru_tones = arsta->txrate.he_ru_alloc;
+ 		arsta->succ_pkts  += succ_pkts;
+ 		arsta->per_succ_pkts += succ_pkts;
++		arsta->succ_bytes += succ_bytes;
++		arsta->ber_succ_bytes += succ_bytes;
+ 		if(arsta->per_fail_pkts + arsta->per_succ_pkts >=
+ 		   ATH11K_NUM_PKTS_THRSHLD_FOR_PER)
+ 			ath11k_sta_stats_update_per(arsta);
++		if(arsta->ber_fail_bytes + arsta->ber_succ_bytes >=
++		   ATH11K_NUM_BYTES_THRSHLD_FOR_BER)
++			ath11k_sta_stats_update_ber(arsta);
+ 
+ 		if (unlikely(ath11k_debugfs_is_extd_tx_stats_enabled(ar)))
+ 			ath11k_debugfs_sta_add_tx_stats(arsta, peer_stats, rate_idx);
+diff --git a/drivers/net/wireless/ath/ath11k/dp_tx.c b/drivers/net/wireless/ath/ath11k/dp_tx.c
+index 03f5b26..6f9bb49 100644
+--- a/drivers/net/wireless/ath/ath11k/dp_tx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_tx.c
+@@ -650,9 +650,14 @@ static void ath11k_dp_tx_complete_msdu(struct ath11k *ar,
+ 	if (ts->status != HAL_WBM_TQM_REL_REASON_FRAME_ACKED) {
+ 		arsta->fail_pkts += 1;
+ 		arsta->per_fail_pkts += 1;
++		arsta->fail_bytes += msdu->len;
++		arsta->ber_fail_bytes += msdu->len;
+ 		if(arsta->per_fail_pkts + arsta->per_succ_pkts >=
+ 		   ATH11K_NUM_PKTS_THRSHLD_FOR_PER)
+ 			ath11k_sta_stats_update_per(arsta);
++		if(arsta->ber_fail_bytes + arsta->ber_succ_bytes >=
++		   ATH11K_NUM_BYTES_THRSHLD_FOR_BER)
++			ath11k_sta_stats_update_ber(arsta);
+ 	}
+ 
+ 	if (unlikely(ath11k_debugfs_is_extd_tx_stats_enabled(ar))) {
+diff --git a/drivers/net/wireless/ath/ath11k/dp_tx.h b/drivers/net/wireless/ath/ath11k/dp_tx.h
+index c41898a..28e7b35 100644
+--- a/drivers/net/wireless/ath/ath11k/dp_tx.h
++++ b/drivers/net/wireless/ath/ath11k/dp_tx.h
+@@ -11,6 +11,7 @@
+ 
+ #define ATH11K_NUM_PKTS_THRSHLD_FOR_PER  50
+ #define ATH11K_GET_PERCENTAGE(value, total_value) (((value)*100)/(total_value))
++#define ATH11K_NUM_BYTES_THRSHLD_FOR_BER 25000
+ 
+ struct ath11k_dp_htt_wbm_tx_status {
+ 	u32 msdu_id;
+@@ -256,4 +257,16 @@ static inline void ath11k_sta_stats_update_per(struct ath11k_sta *arsta) {
+ 	arsta->per_succ_pkts = 0;
+ }
+ 
++static inline void ath11k_sta_stats_update_ber(struct ath11k_sta *arsta) {
++	int ber;
++
++	if(!arsta)
++		return;
++
++	ber = ATH11K_GET_PERCENTAGE(arsta->ber_fail_bytes,
++				    arsta->ber_fail_bytes + arsta->ber_succ_bytes);
++	ewma_sta_ber_add(&arsta->ber, ber);
++	arsta->ber_fail_bytes = 0;
++	arsta->ber_succ_bytes = 0;
++}
+ #endif
+diff --git a/drivers/net/wireless/ath/ath11k/mac.c b/drivers/net/wireless/ath/ath11k/mac.c
+index a5f05ae..535f249 100644
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -5031,6 +5031,8 @@ static int ath11k_mac_station_add(struct ath11k *ar,
+ 
+ 	ewma_sta_per_init(&arsta->per);
+ 	ewma_sta_per_add(&arsta->per, 1);
++	ewma_sta_ber_init(&arsta->ber);
++	ewma_sta_ber_add(&arsta->ber, 1);
+ 	return 0;
+ 
+ free_tx_stats:
+-- 
+2.7.4
+

@@ -1,0 +1,1389 @@
+From 56e7d6333f5a4b485960a4a58b8458bc00509f1e Mon Sep 17 00:00:00 2001
+From: Sowmiya Sree Elavalagan <quic_ssreeela@quicinc.com>
+Date: Sun, 10 Oct 2021 23:22:10 +0530
+Subject: [PATCH 2/2] ath11k: Add tid qos configuration support for ath11k
+
+Add provision to configure tid based noack, retry, aggregation,
+rtscts and bitrate for single peer and for all peer in a vap.
+iw command is used to set these parameters per peer/per vap,
+this is passed to the driver from where it is configured in fw
+through wmi. Driver disables rate control, aggregation and retry
+when noack is set.
+Only single bitrate can be set for a peer.Bitrate should be set only
+according to peer capabilit, HE peer cannot be configured with vht,
+ht or legacy rate.
+In addition added support to enable/disable rtscts for unicast
+management frames
+
+commands:
+iw dev <devname> set tidconf [peer <MAC address>] tids <mask> [override]
+[lretry <num>] [ampdu [on <num>|off]] [amsdu [on <num>|off]]
+[noack [on|off]] [rtscts [on|off]][bitrates <type [auto|fixed|limit]>
+<legacy rate in Mbps>*] [ht-mcs-<2.4|5> <MCS index>*]
+[vht-mcs-<2.4|5> <NSS:MCSx] [he-mcs-<2.4|5> <NSS:MCSx]
+
+Signed-off-by: Sowmiya Sree Elavalagan <quic_ssreeela@quicinc.com>
+---
+ drivers/net/wireless/ath/ath11k/core.h  |  21 +
+ drivers/net/wireless/ath/ath11k/dp_tx.c |   9 +-
+ drivers/net/wireless/ath/ath11k/hw.c    |   5 +-
+ drivers/net/wireless/ath/ath11k/mac.c   | 930 +++++++++++++++++++++++++++++++-
+ drivers/net/wireless/ath/ath11k/wmi.c   |  49 ++
+ drivers/net/wireless/ath/ath11k/wmi.h   |  78 +++
+ 6 files changed, 1087 insertions(+), 5 deletions(-)
+
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -83,6 +83,7 @@ enum wme_ac {
+ #define ATH11K_HT_MCS_MAX	7
+ #define ATH11K_VHT_MCS_MAX	9
+ #define ATH11K_HE_MCS_MAX	11
++#define ATH11K_TID_MAX 8
+ 
+ enum ath11k_crypt_mode {
+ 	/* Only use hardware crypto engine */
+@@ -95,6 +96,7 @@ enum ath11k_crypt_mode {
+ #define ATH11K_FREE_GROUP_IDX_MAP_BITS	32
+ #define ATH11K_FREE_GROUP_IDX_MAP_MAX	(ATH11K_GROUP_KEYS_NUM_MAX /	\
+ 					 ATH11K_FREE_GROUP_IDX_MAP_BITS)
++#define ATH11K_MAX_RETRY_COUNT		30
+ 
+ static inline enum wme_ac ath11k_tid_to_ac(u32 tid)
+ {
+@@ -108,6 +110,7 @@ enum ath11k_skb_flags {
+ 	ATH11K_SKB_HW_80211_ENCAP = BIT(0),
+ 	ATH11K_SKB_CIPHER_SET = BIT(1),
+ 	ATH11K_SKB_TX_STATUS = BIT(2),
++	ATH11K_SKB_F_NOACK_TID = BIT(3),
+ };
+ 
+ struct ath11k_skb_cb {
+@@ -246,6 +249,18 @@ struct ath11k_mac_filter {
+ 	u8 peer_mac[ETH_ALEN];
+ };
+ 
++struct ath11k_tid_qos_config {
++	int noack;
++	int retry_long;
++	int aggr_ctrl;
++	int amsdu_count;
++	int ampdu_count;
++	u8 rate_ctrl;
++	u32 rate_code;
++	int rtscts;
++	int ext_tid_cfg_bitmap;
++};
++
+ struct ath11k_vif {
+ 	u32 vdev_id;
+ 	enum wmi_vdev_type vdev_type;
+@@ -308,6 +323,9 @@ struct ath11k_vif {
+ 	struct list_head ap_vlan_arvifs;
+ 	/* VLAN keyidx map required for Dynamic VLAN */
+ 	u16 *vlan_keyid_map;
++	u32 tid_conf_changed[ATH11K_TID_MAX];
++	struct ath11k_tid_qos_config tid_cfg[ATH11K_TID_MAX];
++	u32 tids_rst;
+ 	DECLARE_BITMAP(free_groupidx_map, ATH11K_GROUP_KEYS_NUM_MAX);
+ };
+ 
+@@ -511,6 +529,8 @@ struct ath11k_sta {
+ 	/*bytes count for bit error rate computation*/
+ 	u32 ber_succ_bytes;
+ 	u32 ber_fail_bytes;
++	struct work_struct tid_config_wk;
++	struct ath11k_tid_qos_config tid_cfg[ATH11K_TID_MAX];
+ #ifdef CPTCFG_ATH11K_CFR
+ 	struct ath11k_per_peer_cfr_capture cfr_capture;
+ #endif
+--- a/drivers/net/wireless/ath/ath11k/dp_tx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_tx.c
+@@ -456,7 +456,8 @@ ath11k_dp_tx_htt_tx_complete_buf(struct
+ 	memset(&info->status, 0, sizeof(info->status));
+ 
+ 	if (ts->acked) {
+-		if (!(info->flags & IEEE80211_TX_CTL_NO_ACK)) {
++		if (!(info->flags & IEEE80211_TX_CTL_NO_ACK) &&
++		    !(flags & ATH11K_SKB_F_NOACK_TID)) {
+ 			info->flags |= IEEE80211_TX_STAT_ACK;
+ 			info->status.ack_signal = ATH11K_DEFAULT_NOISE_FLOOR +
+ 						  ts->ack_rssi;
+@@ -591,7 +592,8 @@ static void ath11k_dp_tx_complete_msdu(s
+ 	info->status.rates[0].idx = -1;
+ 
+ 	if (ts->status == HAL_WBM_TQM_REL_REASON_FRAME_ACKED &&
+-	    !(info->flags & IEEE80211_TX_CTL_NO_ACK)) {
++	    !(info->flags & IEEE80211_TX_CTL_NO_ACK) &&
++	    !(flags & ATH11K_SKB_F_NOACK_TID)) {
+ 		info->flags |= IEEE80211_TX_STAT_ACK;
+ 		info->status.ack_signal = ATH11K_DEFAULT_NOISE_FLOOR +
+ 					  ts->ack_rssi;
+@@ -599,7 +601,8 @@ static void ath11k_dp_tx_complete_msdu(s
+ 	}
+ 
+ 	if (ts->status == HAL_WBM_TQM_REL_REASON_CMD_REMOVE_TX &&
+-	    (info->flags & IEEE80211_TX_CTL_NO_ACK))
++	    (info->flags & IEEE80211_TX_CTL_NO_ACK) &&
++	    (flags & ATH11K_SKB_F_NOACK_TID))
+ 		info->flags |= IEEE80211_TX_STAT_NOACK_TRANSMITTED;
+ 
+ 	if (unlikely(ath11k_debugfs_is_extd_tx_stats_enabled(ar))) {
+--- a/drivers/net/wireless/ath/ath11k/hw.c
++++ b/drivers/net/wireless/ath/ath11k/hw.c
+@@ -157,7 +157,10 @@ static void ath11k_init_wmi_config_ipq80
+ 	config->ema_max_profile_period = TARGET_EMA_MAX_PROFILE_PERIOD;
+ 	config->beacon_tx_offload_max_vdev += config->ema_max_vap_cnt;
+ 	config->smart_ant_cap = 1;
+-
++	if (test_bit(WMI_TLV_SERVICE_EXT_PEER_TID_CONFIGS_SUPPORT,
++		     ab->wmi_ab.svc_map)) {
++		config->peer_tid_ext |= WMI_RSRC_CFG_FLAG_PEER_TID_EXT;
++	}
+ }
+ 
+ static int ath11k_hw_mac_id_to_pdev_id_ipq8074(struct ath11k_hw_params *hw,
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -4310,6 +4310,180 @@ exit:
+ 	return ret;
+ }
+ 
++static int ath11k_new_peer_tid_config(struct ath11k *ar,
++				      struct ieee80211_sta *sta,
++				      struct ath11k_vif *arvif)
++{
++	struct wmi_per_peer_per_tid_cfg_arg arg = {};
++	struct ath11k_sta *arsta = (struct ath11k_sta *)sta->drv_priv;
++	bool config_apply;
++	int ret, i;
++
++	for (i = 0; i < ATH11K_TID_MAX; i++) {
++		config_apply = false;
++		if (arvif->tid_cfg[i].retry_long || arvif->tid_cfg[i].aggr_ctrl ||
++		    arvif->tid_cfg[i].rate_ctrl || arvif->tid_cfg[i].rate_code ||
++		    arvif->tid_cfg[i].rtscts) {
++			config_apply = true;
++			arg.tid = i;
++			arg.vdev_id = arvif->vdev_id;
++			arg.retry_count = arvif->tid_cfg[i].retry_long;
++			arg.aggr_control = arvif->tid_cfg[i].aggr_ctrl;
++			arg.rate_ctrl = arvif->tid_cfg[i].rate_ctrl;
++			arg.rcode_flags = arvif->tid_cfg[i].rate_code;
++			if (arvif->tid_cfg[i].rtscts)
++				arg.ext_tid_cfg_bitmap |=
++					WMI_EXT_TID_RTS_CTS_CONFIG;
++			arg.rtscts_ctrl = arvif->tid_cfg[i].rtscts;
++			if (arvif->tid_cfg[i].aggr_ctrl) {
++				if (arvif->tid_cfg[i].ampdu_count) {
++					arg.ext_tid_cfg_bitmap |=
++						WMI_PEER_TID_MAX_NUM_MPDU_IN_PPDU_VALID;
++					arg.max_num_mpdu_in_ppdu = arvif->tid_cfg[i].ampdu_count;
++				}
++				if (arvif->tid_cfg[i].amsdu_count) {
++					arg.ext_tid_cfg_bitmap |=
++						WMI_PEER_TID_MAX_NUM_MSDU_IN_MPDU_VALID;
++					arg.max_num_msdu_in_mpdu = arvif->tid_cfg[i].amsdu_count;
++				}
++			}
++		}
++
++		if (arvif->tid_cfg[i].noack == WMI_PEER_TID_CONFIG_NOACK) {
++			arg.ack_policy	= arvif->tid_cfg[i].noack;
++			arg.rate_ctrl =
++				WMI_TID_CONFIG_RATE_CONTROL_DEFAULT_LOWEST_RATE;
++			arg.aggr_control = WMI_TID_CONFIG_AGGR_CONTROL_DISABLE;
++			config_apply = true;
++		}
++
++		/* Assign default value(-1) to newly connected station.
++		 * This is to identify station specific tid configuration not
++		 * configured for the station.
++		 */
++		arsta->tid_cfg[i].retry_long = -1;
++		arsta->tid_cfg[i].noack = -1;
++		arsta->tid_cfg[i].aggr_ctrl = -1;
++
++		if (!config_apply)
++			continue;
++
++		ether_addr_copy(arg.peer_macaddr.addr, sta->addr);
++		ret = ath11k_wmi_set_per_peer_per_tid_cfg(ar, &arg);
++		if (ret) {
++			ath11k_warn(ar->ab, "failed to set per tid retry/aggr config for sta %pM: %d\n",
++				    sta->addr, ret);
++			return ret;
++		}
++		memset(&arg, 0, sizeof(arg));
++	}
++	return 0;
++}
++
++static int ath11k_mac_validate_rate_mask(struct ath11k *ar,
++					 struct ieee80211_sta *sta,
++					 u32 rate_ctrl_flag, u8 nss)
++{
++	if (nss > sta->rx_nss) {
++		ath11k_warn(ar->ab, "Invalid nss field, configured %u limit %u\n",
++			    nss, sta->rx_nss);
++		return -EINVAL;
++	}
++
++	if (ATH11K_HW_PREAMBLE(rate_ctrl_flag) == WMI_RATE_PREAMBLE_HE) {
++		if (!sta->he_cap.has_he) {
++			ath11k_warn(ar->ab, "Invalid HE rate for sta %pM\n",
++				    sta->addr);
++			return -EINVAL;
++		}
++	} else if (ATH11K_HW_PREAMBLE(rate_ctrl_flag) == WMI_RATE_PREAMBLE_VHT) {
++		if (!sta->vht_cap.vht_supported || sta->he_cap.has_he) {
++			ath11k_warn(ar->ab, "Invalid VHT rate for sta %pM\n",
++				    sta->addr);
++			return -EINVAL;
++		}
++	} else if (ATH11K_HW_PREAMBLE(rate_ctrl_flag) == WMI_RATE_PREAMBLE_HT) {
++		if (!sta->ht_cap.ht_supported || sta->vht_cap.vht_supported) {
++			ath11k_warn(ar->ab, "Invalid HT rate for sta %pM\n",
++				    sta->addr);
++			return -EINVAL;
++		}
++	} else {
++		if (sta->ht_cap.ht_supported ||
++		    sta->vht_cap.vht_supported || sta->he_cap.has_he) {
++			ath11k_warn(ar->ab, "Invalid rate cap\n");
++			return -EINVAL;
++		}
++	}
++
++	return 0;
++}
++
++static int
++ath11k_mac_get_single_rate(struct ath11k *ar,
++			   enum nl80211_band band,
++			   const struct cfg80211_bitrate_mask *mask,
++			   u32 *rate, u8 *nss)
++{
++	int rate_idx;
++	int i;
++	u16 bitrate;
++	u8 preamble;
++	u8 hw_rate;
++
++	if (hweight32(mask->control[band].legacy) == 1) {
++		rate_idx = ffs(mask->control[band].legacy) - 1;
++		if (band == NL80211_BAND_5GHZ || band == NL80211_BAND_6GHZ)
++			rate_idx += ATH11K_MAC_FIRST_OFDM_RATE_IDX;
++
++		hw_rate = ath11k_legacy_rates[rate_idx].hw_value;
++		bitrate = ath11k_legacy_rates[rate_idx].bitrate;
++
++		if (ath11k_mac_bitrate_is_cck(bitrate))
++			preamble = WMI_RATE_PREAMBLE_CCK;
++		else
++			preamble = WMI_RATE_PREAMBLE_OFDM;
++
++		*nss = 1;
++		*rate = ATH11K_HW_RATE_CODE(hw_rate, 0, preamble);
++
++		return 0;
++	}
++
++	for (i = 0; i < ARRAY_SIZE(mask->control[band].ht_mcs); i++) {
++		if (hweight16(mask->control[band].ht_mcs[i]) == 1) {
++			*nss = i + 1;
++			hw_rate = ffs(mask->control[band].ht_mcs[i]) - 1;
++			*rate = ATH11K_HW_RATE_CODE(hw_rate, (*nss - 1),
++						    WMI_RATE_PREAMBLE_HT);
++
++			return 0;
++		}
++	}
++
++	for (i = 0; i < ARRAY_SIZE(mask->control[band].vht_mcs); i++) {
++		if (hweight16(mask->control[band].vht_mcs[i]) == 1) {
++			*nss = i + 1;
++			hw_rate = ffs(mask->control[band].vht_mcs[i]) - 1;
++			*rate = ATH11K_HW_RATE_CODE(hw_rate, (*nss - 1),
++						    WMI_RATE_PREAMBLE_VHT);
++			return 0;
++		}
++	}
++
++	for (i = 0; i < ARRAY_SIZE(mask->control[band].he_mcs); i++) {
++		if (hweight16(mask->control[band].he_mcs[i]) == 1) {
++			*nss = i + 1;
++			hw_rate = ffs(mask->control[band].he_mcs[i]) - 1;
++			*rate = ATH11K_HW_RATE_CODE(hw_rate, (*nss - 1),
++						    WMI_RATE_PREAMBLE_HE);
++
++			return 0;
++		}
++	}
++	return -EINVAL;
++}
++
+ static int
+ ath11k_mac_bitrate_mask_num_vht_rates(struct ath11k *ar,
+ 				      enum nl80211_band band,
+@@ -4564,8 +4738,10 @@ static int ath11k_station_assoc(struct a
+ 			return ret;
+ 		}
+ 	}
++	if (!test_bit(WMI_TLV_SERVICE_PEER_TID_CONFIGS_SUPPORT, ar->ab->wmi_ab.svc_map))
++		return 0;
+ 
+-	return 0;
++	return ath11k_new_peer_tid_config(ar, sta, arvif);
+ }
+ 
+ static int ath11k_station_disassoc(struct ath11k *ar,
+@@ -5091,6 +5267,201 @@ static int ath11k_mac_cfg_dyn_vlan(struc
+ 	return ret;
+ }
+ 
++static int ath11k_mac_reset_tid_config(struct ath11k *ar,
++				       struct ieee80211_sta *sta,
++				       struct ath11k_vif *arvif,
++				       u8 tids)
++{
++	struct ath11k_sta *arsta = (struct ath11k_sta *)sta->drv_priv;
++	struct wmi_per_peer_per_tid_cfg_arg arg;
++	int ret = 0, i = 0;
++
++	arg.vdev_id = arvif->vdev_id;
++	while (i < ATH11K_TID_MAX) {
++		if (!(tids & BIT(i))) {
++			i++;
++			continue;
++		}
++
++		arg.tid = i;
++		arg.ack_policy = WMI_PEER_TID_CONFIG_ACK;
++		arg.retry_count = ATH11K_MAX_RETRY_COUNT;
++		arg.rate_ctrl = WMI_TID_CONFIG_RATE_CONTROL_AUTO;
++		arg.aggr_control = WMI_TID_CONFIG_AGGR_CONTROL_ENABLE;
++		arg.rtscts_ctrl = WMI_TID_CONFIG_RTSCTS_CTRL_RESET;
++		arg.max_num_mpdu_in_ppdu = 0;
++		arg.max_num_msdu_in_mpdu = 0;
++		arg.ext_tid_cfg_bitmap = WMI_EXT_TID_RTS_CTS_CONFIG |
++					 WMI_PEER_TID_MAX_NUM_MPDU_IN_PPDU_VALID |
++					 WMI_PEER_TID_MAX_NUM_MSDU_IN_MPDU_VALID;
++		ether_addr_copy(arg.peer_macaddr.addr, sta->addr);
++		ret = ath11k_wmi_set_per_peer_per_tid_cfg(ar, &arg);
++		if (ret)
++			return ret;
++
++		if (!arvif->tids_rst) {
++			arsta->tid_cfg[i].retry_long = -1;
++			arsta->tid_cfg[i].noack = -1;
++			arsta->tid_cfg[i].aggr_ctrl = -1;
++			arsta->tid_cfg[i].rate_code = -1;
++			arsta->tid_cfg[i].rate_ctrl = 0;
++			arsta->tid_cfg[i].rtscts = -1;
++		} else {
++			arvif->tid_cfg[i].retry_long = 0;
++			arvif->tid_cfg[i].noack = 0;
++			arvif->tid_cfg[i].aggr_ctrl = 0;
++			arvif->tid_cfg[i].rate_code = 0;
++			arvif->tid_cfg[i].rate_ctrl = 0;
++			arvif->tid_cfg[i].rtscts = 0;
++			arvif->tid_cfg[i].ampdu_count = 0;
++			arvif->tid_cfg[i].amsdu_count = 0;
++		}
++		i++;
++	}
++	return ret;
++}
++
++static void ath11k_sta_tid_cfg_wk(struct work_struct *wk)
++{
++	struct wmi_per_peer_per_tid_cfg_arg arg = {};
++	struct ieee80211_sta *sta;
++	struct ath11k_sta *arsta;
++	struct ath11k_vif *arvif;
++	struct ath11k *ar;
++	bool config_apply;
++	int ret, i;
++	u32 changed;
++	u8 nss;
++
++	arsta = container_of(wk, struct ath11k_sta, tid_config_wk);
++	sta = container_of((void *)arsta, struct ieee80211_sta, drv_priv);
++	arvif = arsta->arvif;
++	ar = arvif->ar;
++
++	mutex_lock(&ar->conf_mutex);
++
++	if (arvif->tids_rst) {
++		ret = ath11k_mac_reset_tid_config(ar, sta, arvif,
++						  arvif->tids_rst);
++		goto exit;
++	}
++
++	ether_addr_copy(arg.peer_macaddr.addr, sta->addr);
++	for (i = 0; i < ATH11K_TID_MAX; i++) {
++		config_apply = false;
++		changed = arvif->tid_conf_changed[i];
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_NOACK)) {
++			if (arsta->tid_cfg[i].noack != -1) {
++				arg.ack_policy  = 0;
++			} else {
++				config_apply = true;
++				arg.ack_policy = arvif->tid_cfg[i].noack;
++				arg.aggr_control = arvif->tid_cfg[i].aggr_ctrl;
++				arg.rate_ctrl = arvif->tid_cfg[i].rate_ctrl;
++			}
++		}
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_RETRY_LONG)) {
++			if (arsta->tid_cfg[i].retry_long != -1 ||
++			    arsta->tid_cfg[i].noack == WMI_PEER_TID_CONFIG_NOACK ||
++			    arvif->tid_cfg[i].noack == WMI_PEER_TID_CONFIG_NOACK) {
++				arg.retry_count = 0;
++			} else {
++				arg.retry_count = arvif->tid_cfg[i].retry_long;
++				config_apply = true;
++			}
++		}
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_AMPDU_CTRL)) {
++			if (arsta->tid_cfg[i].aggr_ctrl != -1 ||
++			    arsta->tid_cfg[i].noack == WMI_PEER_TID_CONFIG_NOACK ||
++			    arvif->tid_cfg[i].noack == WMI_PEER_TID_CONFIG_NOACK) {
++				arg.aggr_control = WMI_TID_CONFIG_AGGR_CONTROL_DISABLE;
++			} else {
++				arg.aggr_control = arvif->tid_cfg[i].aggr_ctrl;
++				config_apply = true;
++			}
++		}
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_AMSDU_CTRL)) {
++			if (arsta->tid_cfg[i].aggr_ctrl != -1 ||
++			    arsta->tid_cfg[i].noack == WMI_PEER_TID_CONFIG_NOACK ||
++			    arvif->tid_cfg[i].noack == WMI_PEER_TID_CONFIG_NOACK) {
++				arg.aggr_control = WMI_TID_CONFIG_AGGR_CONTROL_DISABLE;
++			} else {
++				arg.aggr_control = arvif->tid_cfg[i].aggr_ctrl;
++				config_apply = true;
++			}
++		}
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_AMPDU_CTRL)) {
++			arg.max_num_mpdu_in_ppdu = arvif->tid_cfg[i].ampdu_count;
++			arg.ext_tid_cfg_bitmap = arvif->tid_cfg[i].ext_tid_cfg_bitmap;
++		}
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_AMSDU_CTRL)) {
++			arg.max_num_msdu_in_mpdu = arvif->tid_cfg[i].amsdu_count;
++			arg.ext_tid_cfg_bitmap = arvif->tid_cfg[i].ext_tid_cfg_bitmap;
++		}
++
++		if (changed & (BIT(NL80211_TID_CONFIG_ATTR_TX_RATE) |
++		    BIT(NL80211_TID_CONFIG_ATTR_TX_RATE_TYPE))) {
++			nss = ATH11K_HW_NSS(arvif->tid_cfg[i].rate_code);
++			ret = ath11k_mac_validate_rate_mask(ar, sta,
++							    arvif->tid_cfg[i].rate_code,
++							    nss);
++			if (ret &&
++			    arvif->tid_cfg[i].rate_ctrl > WMI_TID_CONFIG_RATE_CONTROL_AUTO) {
++				arg.rate_ctrl = 0;
++				arg.rcode_flags = 0;
++			}
++
++			if (arsta->tid_cfg[i].rate_ctrl >
++			    WMI_TID_CONFIG_RATE_CONTROL_AUTO ||
++			    arsta->tid_cfg[i].noack == WMI_PEER_TID_CONFIG_NOACK ||
++			    arvif->tid_cfg[i].noack == WMI_PEER_TID_CONFIG_NOACK) {
++				arg.rate_ctrl = 0;
++				arg.rcode_flags = 0;
++			} else {
++				arg.rate_ctrl = arvif->tid_cfg[i].rate_ctrl;
++				arg.rcode_flags = arvif->tid_cfg[i].rate_code;
++				config_apply = true;
++			}
++		}
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_RTSCTS_CTRL)) {
++			if (arsta->tid_cfg[i].rtscts) {
++				arg.rtscts_ctrl = 0;
++				arg.ext_tid_cfg_bitmap &= ~WMI_EXT_TID_RTS_CTS_CONFIG;
++			} else {
++				arg.rtscts_ctrl = arvif->tid_cfg[i].rtscts;
++				arg.ext_tid_cfg_bitmap |=
++					WMI_EXT_TID_RTS_CTS_CONFIG;
++				config_apply = true;
++			}
++		}
++
++		arg.tid = i;
++
++		if (config_apply) {
++			ret = ath11k_wmi_set_per_peer_per_tid_cfg(ar, &arg);
++			if (ret)
++				ath11k_warn(ar->ab, "failed to set per tid config for sta %pM: %d\n",
++					    sta->addr, ret);
++		}
++
++		arg.ack_policy  = 0;
++		arg.retry_count  = 0;
++		arg.aggr_control  = 0;
++		arg.rate_ctrl = 0;
++		arg.rcode_flags = 0;
++		arg.max_num_msdu_in_mpdu = 0;
++		arg.max_num_mpdu_in_ppdu = 0;
++	}
++exit:
++	mutex_unlock(&ar->conf_mutex);
++}
++
+ static int ath11k_mac_op_sta_state(struct ieee80211_hw *hw,
+ 				   struct ieee80211_vif *vif,
+ 				   struct ieee80211_sta *sta,
+@@ -5108,6 +5479,7 @@ static int ath11k_mac_op_sta_state(struc
+ 	     new_state == IEEE80211_STA_NOTEXIST)) {
+ 		cancel_work_sync(&arsta->update_wk);
+ 		cancel_work_sync(&arsta->use_4addr_wk);
++		cancel_work_sync(&arsta->tid_config_wk);
+ 	}
+ 
+ 	mutex_lock(&ar->conf_mutex);
+@@ -5119,6 +5491,7 @@ static int ath11k_mac_op_sta_state(struc
+ 		arsta->peer_ps_state = WMI_PEER_PS_STATE_DISABLED;
+ 		INIT_WORK(&arsta->update_wk, ath11k_sta_rc_update_wk);
+ 		INIT_WORK(&arsta->use_4addr_wk, ath11k_sta_use_4addr_wk);
++		INIT_WORK(&arsta->tid_config_wk, ath11k_sta_tid_cfg_wk);
+ 
+ 		ret = ath11k_mac_station_add(ar, vif, sta);
+ 		if (ret)
+@@ -6302,6 +6675,8 @@ static void ath11k_mac_op_tx(struct ieee
+ 	struct ath11k_sta *arsta = NULL;
+ 	bool is_prb_rsp;
+ 	u16 frm_type = 0;
++	u8 tid, *qos_ctl;
++	bool noack = false;
+ 	int ret;
+ 
+ 	memset(skb_cb, 0, sizeof(*skb_cb));
+@@ -6356,6 +6731,29 @@ static void ath11k_mac_op_tx(struct ieee
+ 	    ar->monitor_vdev_created)
+ 		skb_cb->flags |= ATH11K_SKB_TX_STATUS;
+ 
++	if (ieee80211_is_data_qos(hdr->frame_control)) {
++		qos_ctl = ieee80211_get_qos_ctl(hdr);
++		tid = (*qos_ctl) & IEEE80211_QOS_CTL_TID_MASK;
++
++		if (arvif->tid_cfg[tid].noack == WMI_PEER_TID_CONFIG_NOACK)
++			noack = true;
++
++		/* sta specific config has high precedence over vif specific config
++		 * Hence overwrite sta specific config if it is present
++		 */
++		if (sta) {
++			arsta = (struct ath11k_sta *)sta->drv_priv;
++			if (arsta->tid_cfg[tid].noack == WMI_PEER_TID_CONFIG_NOACK)
++				noack = true;
++
++			if (arsta->tid_cfg[tid].noack == WMI_PEER_TID_CONFIG_ACK)
++				noack = false;
++		}
++
++		if (noack)
++			skb_cb->flags |= ATH11K_SKB_F_NOACK_TID;
++	}
++
+ 	if (ar->ab->nss.enabled)
+ 		ret = ath11k_nss_tx(arvif, skb);
+ 	else
+@@ -8041,6 +8439,24 @@ ath11k_mac_bitrate_mask_num_ht_rates(str
+ }
+ 
+ static bool
++ath11k_mac_has_single_rate(struct ath11k *ar,
++			   enum nl80211_band band,
++			   const struct cfg80211_bitrate_mask *mask)
++{
++	int num_rates = 0;
++
++	num_rates = hweight32(mask->control[band].legacy);
++
++	num_rates += ath11k_mac_bitrate_mask_num_ht_rates(ar, band, mask);
++
++	num_rates += ath11k_mac_bitrate_mask_num_vht_rates(ar, band, mask);
++
++	num_rates += ath11k_mac_bitrate_mask_num_he_rates(ar, band, mask);
++
++	return num_rates == 1;
++}
++
++static bool
+ ath11k_mac_has_single_legacy_rate(struct ath11k *ar,
+ 				  enum nl80211_band band,
+ 				  const struct cfg80211_bitrate_mask *mask)
+@@ -8172,6 +8588,533 @@ ath11k_mac_get_single_legacy_rate(struct
+ }
+ 
+ static int
++ath11k_mac_tid_bitrate_config(struct ath11k *ar,
++			      struct ieee80211_vif *vif,
++			      struct ieee80211_sta *sta,
++			      u32 *rate_ctrl_flag, u8 *rate_ctrl,
++			      enum nl80211_tx_rate_setting txrate_type,
++			      const struct cfg80211_bitrate_mask *mask)
++{
++	struct cfg80211_chan_def def;
++	enum nl80211_band band;
++	u8 nss;
++	u32 rate;
++	int ret;
++
++	if (WARN_ON(ath11k_mac_vif_chan(vif, &def)))
++		return -EINVAL;
++
++	if (txrate_type == NL80211_TX_RATE_AUTOMATIC) {
++		*rate_ctrl = WMI_TID_CONFIG_RATE_CONTROL_AUTO;
++		*rate_ctrl_flag = 0;
++		return 0;
++	}
++
++	band = def.chan->band;
++
++	if (!ath11k_mac_has_single_rate(ar, band, mask)) {
++		ath11k_warn(ar->ab, "Multiple rates configured for tidconf\n");
++		return -EINVAL;
++	}
++
++	ret = ath11k_mac_get_single_rate(ar, band, mask, &rate, &nss);
++	if (ret) {
++		ath11k_warn(ar->ab, "failed to get single rate: %d\n",
++			    ret);
++		return ret;
++	}
++	*rate_ctrl_flag = rate;
++
++	if (sta && ath11k_mac_validate_rate_mask(ar, sta, *rate_ctrl_flag, nss)) {
++		ath11k_warn(ar->ab, "Rate mask validation failed\n");
++		return -EINVAL;
++	}
++
++	if (txrate_type == NL80211_TX_RATE_FIXED)
++		*rate_ctrl = WMI_TID_CONFIG_RATE_CONTROL_FIXED_RATE;
++	else if ((txrate_type == NL80211_TX_RATE_LIMITED) &&
++		 (test_bit(WMI_TLV_SERVICE_EXT_PEER_TID_CONFIGS_SUPPORT,
++			   ar->ab->wmi_ab.svc_map)))
++		*rate_ctrl = WMI_PEER_TID_CONFIG_RATE_UPPER_CAP;
++	else
++		return -EOPNOTSUPP;
++	return 0;
++}
++
++static int ath11k_mac_set_tid_config(struct ath11k *ar, struct ieee80211_sta *sta,
++				     struct ieee80211_vif *vif, u32 changed,
++				     struct wmi_per_peer_per_tid_cfg_arg *arg)
++{
++	struct ath11k_vif *arvif = (void *)vif->drv_priv;
++	struct ath11k_sta *arsta;
++	int ret;
++
++	if (sta) {
++		if (!sta->wme)
++			return -EOPNOTSUPP;
++
++		arsta = (struct ath11k_sta *)sta->drv_priv;
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_NOACK)) {
++			if (arg->ack_policy == WMI_PEER_TID_CONFIG_NOACK) {
++				arg->aggr_control = WMI_TID_CONFIG_AGGR_CONTROL_DISABLE;
++				arg->rate_ctrl = 0;
++				arg->rcode_flags = 0;
++			}
++		}
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_AMPDU_CTRL)) {
++			if (arsta->tid_cfg[arg->tid].noack == WMI_PEER_TID_CONFIG_NOACK ||
++			    arvif->tid_cfg[arg->tid].noack == WMI_PEER_TID_CONFIG_NOACK) {
++				arg->aggr_control = WMI_TID_CONFIG_AGGR_CONTROL_DISABLE;
++				arg->ext_tid_cfg_bitmap &= ~WMI_PEER_TID_MAX_NUM_MPDU_IN_PPDU_VALID;
++				changed &= ~BIT(NL80211_TID_CONFIG_ATTR_RETRY_LONG);
++			}
++		}
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_AMSDU_CTRL)) {
++			if (arsta->tid_cfg[arg->tid].noack == WMI_PEER_TID_CONFIG_NOACK ||
++			    arvif->tid_cfg[arg->tid].noack == WMI_PEER_TID_CONFIG_NOACK) {
++				arg->aggr_control = WMI_TID_CONFIG_AGGR_CONTROL_DISABLE;
++				arg->ext_tid_cfg_bitmap &= ~WMI_PEER_TID_MAX_NUM_MSDU_IN_MPDU_VALID;
++				changed &= ~BIT(NL80211_TID_CONFIG_ATTR_RETRY_LONG);
++			}
++		}
++
++		if (changed & (BIT(NL80211_TID_CONFIG_ATTR_TX_RATE) |
++		    BIT(NL80211_TID_CONFIG_ATTR_TX_RATE_TYPE))) {
++			if (arsta->tid_cfg[arg->tid].noack == WMI_PEER_TID_CONFIG_NOACK ||
++			    arvif->tid_cfg[arg->tid].noack == WMI_PEER_TID_CONFIG_NOACK) {
++				arg->rate_ctrl = 0;
++				arg->rcode_flags = 0;
++			}
++		}
++
++		if (arg->aggr_control == WMI_TID_CONFIG_AGGR_CONTROL_DISABLE) {
++			arg->aggr_control_ampdu = 0;
++			arg->aggr_control_amsdu = 0;
++			arg->max_num_mpdu_in_ppdu = 0;
++			arg->max_num_msdu_in_mpdu = 0;
++			arg->ext_tid_cfg_bitmap &=
++				~(WMI_PEER_TID_MAX_NUM_MPDU_IN_PPDU_VALID |
++				  WMI_PEER_TID_MAX_NUM_MSDU_IN_MPDU_VALID);
++		} else if (arg->aggr_control_ampdu == WMI_TID_CONFIG_AGGR_CONTROL_DISABLE &&
++			   arg->aggr_control_amsdu == WMI_TID_CONFIG_AGGR_CONTROL_DISABLE) {
++			arg->aggr_control = WMI_TID_CONFIG_AGGR_CONTROL_DISABLE;
++		} else if ((arg->aggr_control_ampdu == WMI_TID_CONFIG_AGGR_CONTROL_ENABLE ||
++			    arg->aggr_control_ampdu == WMI_TID_CONFIG_AGGR_CONTROL_IGNORE) &&
++			   arg->aggr_control_amsdu == WMI_TID_CONFIG_AGGR_CONTROL_DISABLE) {
++			arg->aggr_control = WMI_TID_CONFIG_AGGR_CONTROL_ENABLE;
++			arg->max_num_msdu_in_mpdu = 1;
++			arg->ext_tid_cfg_bitmap |= WMI_PEER_TID_MAX_NUM_MSDU_IN_MPDU_VALID;
++		} else if (arg->aggr_control_ampdu == WMI_TID_CONFIG_AGGR_CONTROL_DISABLE &&
++			   (arg->aggr_control_amsdu == WMI_TID_CONFIG_AGGR_CONTROL_ENABLE ||
++			    arg->aggr_control_amsdu == WMI_TID_CONFIG_AGGR_CONTROL_IGNORE)) {
++			arg->aggr_control = WMI_TID_CONFIG_AGGR_CONTROL_ENABLE;
++			arg->max_num_mpdu_in_ppdu = 1;
++			arg->ext_tid_cfg_bitmap |= WMI_PEER_TID_MAX_NUM_MPDU_IN_PPDU_VALID;
++		} else if (arg->aggr_control_ampdu == WMI_TID_CONFIG_AGGR_CONTROL_ENABLE ||
++			   arg->aggr_control_amsdu == WMI_TID_CONFIG_AGGR_CONTROL_ENABLE) {
++			arg->aggr_control = WMI_TID_CONFIG_AGGR_CONTROL_ENABLE;
++		}
++
++		ether_addr_copy(arg->peer_macaddr.addr, sta->addr);
++		ret = ath11k_wmi_set_per_peer_per_tid_cfg(ar, arg);
++		if (ret)
++			return ret;
++
++		/* Store the configured parameters in success case */
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_NOACK))
++			arsta->tid_cfg[arg->tid].noack = arg->ack_policy;
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_RETRY_LONG))
++			arsta->tid_cfg[arg->tid].retry_long = arg->retry_count;
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_AMPDU_CTRL))
++			arsta->tid_cfg[arg->tid].aggr_ctrl = arg->aggr_control;
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_AMSDU_CTRL))
++			arsta->tid_cfg[arg->tid].aggr_ctrl = arg->aggr_control;
++
++		if (changed & (BIT(NL80211_TID_CONFIG_ATTR_TX_RATE) |
++		    BIT(NL80211_TID_CONFIG_ATTR_TX_RATE_TYPE))) {
++			arsta->tid_cfg[arg->tid].rate_ctrl = arg->rate_ctrl;
++		}
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_RTSCTS_CTRL))
++			arsta->tid_cfg[arg->tid].rtscts = arg->rtscts_ctrl;
++
++	} else {
++		/* Below is per vif config, all configs are saved in arvif and then
++		 * configured for every peer
++		 */
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_NOACK)) {
++			if (arg->ack_policy == WMI_PEER_TID_CONFIG_NOACK) {
++				arvif->tid_cfg[arg->tid].noack =
++						WMI_TID_CONFIG_AGGR_CONTROL_DISABLE;
++				arvif->tid_cfg[arg->tid].rate_ctrl = 0;
++				arvif->tid_cfg[arg->tid].rate_code = 0;
++			} else {
++				arvif->tid_cfg[arg->tid].noack = arg->ack_policy;
++				arvif->tid_cfg[arg->tid].rate_ctrl = arg->rate_ctrl;
++			}
++		}
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_RETRY_LONG)) {
++			if (arvif->tid_cfg[arg->tid].noack == WMI_PEER_TID_CONFIG_NOACK)
++				changed &= ~BIT(NL80211_TID_CONFIG_ATTR_RETRY_LONG);
++			else
++				arvif->tid_cfg[arg->tid].retry_long = arg->retry_count;
++		}
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_AMPDU_CTRL)) {
++			if (arvif->tid_cfg[arg->tid].noack == WMI_PEER_TID_CONFIG_NOACK) {
++				changed &= ~BIT(NL80211_TID_CONFIG_ATTR_AMPDU_CTRL);
++				arg->aggr_control = WMI_TID_CONFIG_AGGR_CONTROL_DISABLE;
++				arg->ext_tid_cfg_bitmap &=
++						~WMI_PEER_TID_MAX_NUM_MPDU_IN_PPDU_VALID;
++			}
++		}
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_AMPDU_COUNT))
++			arvif->tid_cfg[arg->tid].ampdu_count = arg->max_num_mpdu_in_ppdu;
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_AMSDU_CTRL)) {
++			if (arvif->tid_cfg[arg->tid].noack == WMI_PEER_TID_CONFIG_NOACK) {
++				changed &= ~BIT(NL80211_TID_CONFIG_ATTR_AMSDU_CTRL);
++				arg->aggr_control = WMI_TID_CONFIG_AGGR_CONTROL_DISABLE;
++				arg->ext_tid_cfg_bitmap &=
++						~WMI_PEER_TID_MAX_NUM_MSDU_IN_MPDU_VALID;
++			}
++		}
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_AMSDU_COUNT))
++			arvif->tid_cfg[arg->tid].amsdu_count = arg->max_num_msdu_in_mpdu;
++
++		if (changed & (BIT(NL80211_TID_CONFIG_ATTR_TX_RATE) |
++		    BIT(NL80211_TID_CONFIG_ATTR_TX_RATE_TYPE))) {
++			if (arvif->tid_cfg[arg->tid].noack == WMI_PEER_TID_CONFIG_NOACK) {
++				changed &= ~(BIT(NL80211_TID_CONFIG_ATTR_TX_RATE) |
++					     BIT(NL80211_TID_CONFIG_ATTR_TX_RATE_TYPE));
++			} else {
++				arvif->tid_cfg[arg->tid].rate_ctrl = arg->rate_ctrl;
++				arvif->tid_cfg[arg->tid].rate_code = arg->rcode_flags;
++			}
++		}
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_RTSCTS_CTRL)) {
++			arvif->tid_cfg[arg->tid].rtscts = arg->rtscts_ctrl;
++			arg->ext_tid_cfg_bitmap |= WMI_EXT_TID_RTS_CTS_CONFIG;
++		}
++
++		if (arg->aggr_control == WMI_TID_CONFIG_AGGR_CONTROL_DISABLE) {
++			arvif->tid_cfg[arg->tid].aggr_ctrl = arg->aggr_control;
++			arg->ext_tid_cfg_bitmap &=
++				~(WMI_PEER_TID_MAX_NUM_MPDU_IN_PPDU_VALID |
++				  WMI_PEER_TID_MAX_NUM_MSDU_IN_MPDU_VALID);
++		} else if (arg->aggr_control_ampdu == WMI_TID_CONFIG_AGGR_CONTROL_DISABLE &&
++			   arg->aggr_control_amsdu == WMI_TID_CONFIG_AGGR_CONTROL_DISABLE) {
++			arvif->tid_cfg[arg->tid].aggr_ctrl = WMI_TID_CONFIG_AGGR_CONTROL_DISABLE;
++		} else if ((arg->aggr_control_ampdu == WMI_TID_CONFIG_AGGR_CONTROL_ENABLE ||
++			    arg->aggr_control_ampdu == WMI_TID_CONFIG_AGGR_CONTROL_IGNORE) &&
++			   arg->aggr_control_amsdu == WMI_TID_CONFIG_AGGR_CONTROL_DISABLE) {
++			arvif->tid_cfg[arg->tid].aggr_ctrl = WMI_TID_CONFIG_AGGR_CONTROL_ENABLE;
++			arvif->tid_cfg[arg->tid].amsdu_count = 1;
++			arg->ext_tid_cfg_bitmap |= WMI_PEER_TID_MAX_NUM_MSDU_IN_MPDU_VALID;
++		} else if (arg->aggr_control_ampdu == WMI_TID_CONFIG_AGGR_CONTROL_DISABLE &&
++			   (arg->aggr_control_amsdu == WMI_TID_CONFIG_AGGR_CONTROL_ENABLE ||
++			    arg->aggr_control_amsdu == WMI_TID_CONFIG_AGGR_CONTROL_IGNORE)) {
++			arvif->tid_cfg[arg->tid].aggr_ctrl = WMI_TID_CONFIG_AGGR_CONTROL_ENABLE;
++			arvif->tid_cfg[arg->tid].ampdu_count = 1;
++			arg->ext_tid_cfg_bitmap |= WMI_PEER_TID_MAX_NUM_MPDU_IN_PPDU_VALID;
++		} else if (arg->aggr_control_ampdu == WMI_TID_CONFIG_AGGR_CONTROL_ENABLE ||
++			   arg->aggr_control_amsdu == WMI_TID_CONFIG_AGGR_CONTROL_ENABLE) {
++			arvif->tid_cfg[arg->tid].aggr_ctrl = WMI_TID_CONFIG_AGGR_CONTROL_ENABLE;
++		}
++
++		arvif->tid_cfg[arg->tid].ext_tid_cfg_bitmap = arg->ext_tid_cfg_bitmap;
++		if (changed)
++			arvif->tid_conf_changed[arg->tid] = changed;
++
++		ath11k_dbg(ar->ab, ATH11K_DBG_MAC,
++			   "Per Vif tidconfig tid %d ack_policy %d aggr %u rate_ctrl %u rcflag 0x%x retry_count %d\n rtscts %d ext_tid_cfg_bitmap %d ampdu_count %d amsdu count %d tid_conf_changed 0x%x\n",
++			   arg->tid, arvif->tid_cfg[arg->tid].noack,
++			   arvif->tid_cfg[arg->tid].aggr_ctrl,
++			   arvif->tid_cfg[arg->tid].rate_ctrl,
++			   arvif->tid_cfg[arg->tid].rate_code,
++			   arvif->tid_cfg[arg->tid].retry_long,
++			   arvif->tid_cfg[arg->tid].rtscts,
++			   arvif->tid_cfg[arg->tid].ext_tid_cfg_bitmap,
++			   arvif->tid_cfg[arg->tid].ampdu_count,
++			   arvif->tid_cfg[arg->tid].amsdu_count,
++			   arvif->tid_conf_changed[arg->tid]);
++	}
++
++	return 0;
++}
++
++struct ath11k_mac_iter_tid_conf_data {
++	struct ieee80211_vif *curr_vif;
++	struct ath11k *ar;
++	bool reset_config;
++};
++
++static void ath11k_mac_vif_stations_tid_conf(void *data,
++					     struct ieee80211_sta *sta)
++{
++	struct ath11k_sta *arsta = (struct ath11k_sta *)sta->drv_priv;
++	struct ath11k_mac_iter_tid_conf_data *iter_data = data;
++	struct ieee80211_vif *sta_vif = arsta->arvif->vif;
++
++	if (sta_vif != iter_data->curr_vif || !sta->wme)
++		return;
++
++	ieee80211_queue_work(iter_data->ar->hw, &arsta->tid_config_wk);
++}
++
++static int ath11k_mac_op_reset_tid_config(struct ieee80211_hw *hw,
++					  struct ieee80211_vif *vif,
++					  struct ieee80211_sta *sta,
++					  u8 tids)
++{
++	struct ath11k_vif *arvif = (void *)vif->drv_priv;
++	struct ath11k_mac_iter_tid_conf_data data = {};
++	struct ath11k *ar = hw->priv;
++	int ret = 0;
++
++	mutex_lock(&ar->conf_mutex);
++
++	if (sta) {
++		arvif->tids_rst = 0;
++		ret = ath11k_mac_reset_tid_config(ar, sta, arvif, tids);
++		goto exit;
++	}
++
++	arvif->tids_rst = tids;
++	data.curr_vif = vif;
++	data.ar = ar;
++	ieee80211_iterate_stations_atomic(hw, ath11k_mac_vif_stations_tid_conf,
++					  &data);
++
++exit:
++	mutex_unlock(&ar->conf_mutex);
++	return ret;
++}
++
++static int
++ath11k_mac_parse_tid_config(struct ath11k *ar,
++			    struct ieee80211_sta *sta,
++			    struct ieee80211_vif *vif,
++			    struct cfg80211_tid_cfg *tid_conf,
++			    struct wmi_per_peer_per_tid_cfg_arg *arg)
++{
++	struct ath11k_vif *arvif = (void *)vif->drv_priv;
++	u32 changed = tid_conf->mask;
++	int ret = 0, i = 0;
++
++	memset(arvif->tid_conf_changed, 0, sizeof(u32) * ATH11K_TID_MAX);
++	if (!changed)
++		return -EINVAL;
++
++	while (i < ATH11K_TID_MAX) {
++		if (!(tid_conf->tids & BIT(i))) {
++			i++;
++			continue;
++		}
++
++		memset(arg, 0, sizeof(struct wmi_per_peer_per_tid_cfg_arg));
++		arg->ack_policy = WMI_NOACK_TID_CONFIG_IGNORE_ACK_POLICY;
++		arg->tid = i;
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_NOACK)) {
++			if (tid_conf->noack == NL80211_TID_CONFIG_ENABLE) {
++				arg->ack_policy = WMI_PEER_TID_CONFIG_NOACK;
++				arg->rate_ctrl =
++					WMI_TID_CONFIG_RATE_CONTROL_DEFAULT_LOWEST_RATE;
++				arg->aggr_control =
++					WMI_TID_CONFIG_AGGR_CONTROL_DISABLE;
++			} else {
++				arg->ack_policy =
++					WMI_PEER_TID_CONFIG_ACK;
++				arg->rate_ctrl =
++					WMI_TID_CONFIG_RATE_CONTROL_AUTO;
++			}
++		}
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_RETRY_LONG))
++			arg->retry_count = tid_conf->retry_long;
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_AMPDU_CTRL)) {
++			if (arg->ack_policy == WMI_PEER_TID_CONFIG_NOACK) {
++				arg->aggr_control_ampdu = WMI_TID_CONFIG_AGGR_CONTROL_DISABLE;
++			} else if (tid_conf->ampdu == NL80211_TID_CONFIG_ENABLE) {
++				arg->aggr_control_ampdu = WMI_TID_CONFIG_AGGR_CONTROL_ENABLE;
++				arg->ext_tid_cfg_bitmap |= WMI_PEER_TID_MAX_NUM_MPDU_IN_PPDU_VALID;
++			} else if (tid_conf->ampdu == NL80211_TID_CONFIG_DISABLE) {
++				arg->aggr_control_ampdu = WMI_TID_CONFIG_AGGR_CONTROL_DISABLE;
++			} else {
++				arg->aggr_control_ampdu = WMI_TID_CONFIG_AGGR_CONTROL_IGNORE;
++			}
++		}
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_AMPDU_COUNT)) {
++			if (arg->ack_policy == WMI_PEER_TID_CONFIG_NOACK ||
++			    arg->aggr_control_ampdu == WMI_TID_CONFIG_AGGR_CONTROL_DISABLE) {
++				arg->max_num_mpdu_in_ppdu = 0;
++			} else if (tid_conf->ampdu_count < 1 ||
++				   tid_conf->ampdu_count > 1024) {
++				ath11k_warn(ar->ab, "Failed to configure ampdu count\n");
++				return -EINVAL;
++			} else {
++				arg->max_num_mpdu_in_ppdu = tid_conf->ampdu_count;
++			}
++		}
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_AMSDU_CTRL)) {
++			if (arg->ack_policy == WMI_PEER_TID_CONFIG_NOACK) {
++				arg->aggr_control_amsdu = WMI_TID_CONFIG_AGGR_CONTROL_DISABLE;
++			} else if (tid_conf->amsdu == NL80211_TID_CONFIG_ENABLE) {
++				arg->aggr_control_amsdu = WMI_TID_CONFIG_AGGR_CONTROL_ENABLE;
++				arg->ext_tid_cfg_bitmap |= WMI_PEER_TID_MAX_NUM_MSDU_IN_MPDU_VALID;
++			} else if (tid_conf->amsdu == NL80211_TID_CONFIG_DISABLE) {
++				arg->aggr_control_amsdu = WMI_TID_CONFIG_AGGR_CONTROL_DISABLE;
++			} else {
++				arg->aggr_control_amsdu = WMI_TID_CONFIG_AGGR_CONTROL_IGNORE;
++			}
++		}
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_AMSDU_COUNT)) {
++			if (arg->ack_policy == WMI_PEER_TID_CONFIG_NOACK ||
++			    arg->aggr_control_amsdu == WMI_TID_CONFIG_AGGR_CONTROL_DISABLE) {
++				arg->max_num_msdu_in_mpdu = 0;
++			} else if (tid_conf->amsdu_count < 1 ||
++				   tid_conf->amsdu_count > 7) {
++				ath11k_warn(ar->ab, "Failed to configure amsdu count\n");
++				return -EINVAL;
++			} else {
++				arg->max_num_msdu_in_mpdu = tid_conf->amsdu_count;
++			}
++		}
++
++		if (changed & (BIT(NL80211_TID_CONFIG_ATTR_TX_RATE) |
++		    BIT(NL80211_TID_CONFIG_ATTR_TX_RATE_TYPE))) {
++			ret = ath11k_mac_tid_bitrate_config(ar, vif, sta,
++							    &arg->rcode_flags,
++							    &arg->rate_ctrl,
++							    tid_conf->txrate_type,
++							    &tid_conf->txrate_mask);
++			if (ret) {
++				ath11k_warn(ar->ab, "failed to configure bitrate mask %d\n",
++					    ret);
++				arg->rcode_flags = 0;
++				arg->rate_ctrl = 0;
++				changed &= ~(BIT(NL80211_TID_CONFIG_ATTR_TX_RATE) |
++					     BIT(NL80211_TID_CONFIG_ATTR_TX_RATE_TYPE));
++			}
++		}
++
++		if (changed & BIT(NL80211_TID_CONFIG_ATTR_RTSCTS_CTRL)) {
++			if (tid_conf->rtscts == NL80211_TID_CONFIG_ENABLE) {
++				arg->rtscts_ctrl = WMI_TID_CONFIG_RTSCTS_CTRL_ENABLE;
++			} else if (tid_conf->rtscts == NL80211_TID_CONFIG_DISABLE) {
++				arg->rtscts_ctrl = WMI_TID_CONFIG_RTSCTS_CTRL_DISABLE;
++			} else {
++				ath11k_warn(ar->ab, "Invalid RTSCTS config\n");
++				return -EINVAL;
++			}
++
++			arg->ext_tid_cfg_bitmap |= WMI_EXT_TID_RTS_CTS_CONFIG;
++		}
++
++		ret = ath11k_mac_set_tid_config(ar, sta, vif, changed, arg);
++		if (ret)
++			return ret;
++		i++;
++	}
++	return ret;
++}
++
++static int ath11k_mac_op_set_tid_config(struct ieee80211_hw *hw,
++					struct ieee80211_vif *vif,
++					struct ieee80211_sta *sta,
++					struct cfg80211_tid_config *tid_config)
++{
++	struct ath11k *ar = hw->priv;
++	struct ath11k_vif *arvif = (void *)vif->drv_priv;
++	struct ath11k_mac_iter_tid_conf_data data = {};
++	struct wmi_per_peer_per_tid_cfg_arg arg = {};
++	int ret, i;
++
++	mutex_lock(&ar->conf_mutex);
++	arg.vdev_id = arvif->vdev_id;
++
++	arvif->tids_rst = 0;
++	memset(arvif->tid_conf_changed, 0, sizeof(arvif->tid_conf_changed));
++
++	for (i = 0; i < tid_config->n_tid_conf; i++) {
++		ret = ath11k_mac_parse_tid_config(ar, sta, vif,
++						  &tid_config->tid_conf[i],
++						  &arg);
++		if (ret)
++			goto exit;
++	}
++
++	if (sta)
++		goto exit;
++
++	ret = 0;
++	arvif->tids_rst = 0;
++	data.curr_vif = vif;
++	data.ar = ar;
++
++	ieee80211_iterate_stations_atomic(hw, ath11k_mac_vif_stations_tid_conf,
++					  &data);
++
++exit:
++	mutex_unlock(&ar->conf_mutex);
++	return ret;
++}
++
++static int ath11k_mac_op_sta_set_mgmt_rts_cts(struct ieee80211_hw *hw,
++					      struct ieee80211_vif *vif,
++					      struct ieee80211_sta *sta)
++{
++	struct ath11k *ar = hw->priv;
++	struct ath11k_vif *arvif = (void *)vif->drv_priv;
++	int ret = 0;
++	int enable_rts_cts;
++
++	if (!test_bit(WMI_TLV_SERVICE_RTSCTS_FOR_UNICAST_MGMT_SUPPORT,
++		      ar->ab->wmi_ab.svc_map)) {
++		ath11k_warn(ar->ab, "RTSCTS for unicast management frame no supported\n");
++		return -EOPNOTSUPP;
++	}
++
++	if (sta->mgmt_rts_cts == NL80211_MGMT_RTS_CTS_ENABLE)
++		enable_rts_cts = 1;
++	else if (sta->mgmt_rts_cts == NL80211_MGMT_RTS_CTS_DISABLE)
++		enable_rts_cts = 0;
++	else
++		return -EINVAL;
++
++	mutex_lock(&ar->conf_mutex);
++
++	ret = ath11k_wmi_set_peer_param(ar, sta->addr, arvif->vdev_id,
++					WMI_PEER_PARAM_EN_RTSCTS_FOR_UNICAST_MGMT,
++					enable_rts_cts);
++	if (ret) {
++		ath11k_warn(ar->ab,
++			    "failed to set rts/cts for management unicaste frames %d\n",
++			    ret);
++		goto out;
++	}
++
++out:
++	mutex_unlock(&ar->conf_mutex);
++	return ret;
++}
++
++static int
+ ath11k_mac_set_fixed_rate_GI_LTF(struct ath11k_vif *arvif, u8 he_gi, u8 he_ltf)
+ {
+ 	struct ath11k *ar = arvif->ar;
+@@ -9005,6 +9948,9 @@ static const struct ieee80211_ops ath11k
+ 	.get_survey			= ath11k_mac_op_get_survey,
+ 	.flush				= ath11k_mac_op_flush,
+ 	.sta_statistics			= ath11k_mac_op_sta_statistics,
++	.set_tid_config			= ath11k_mac_op_set_tid_config,
++	.reset_tid_config		= ath11k_mac_op_reset_tid_config,
++	.sta_set_mgmt_rts_cts		= ath11k_mac_op_sta_set_mgmt_rts_cts,
+ 	CFG80211_TESTMODE_CMD(ath11k_tm_cmd)
+ #ifdef CPTCFG_ATH11K_DEBUGFS
+ 	.sta_add_debugfs		= ath11k_debugfs_sta_op_add,
+@@ -9486,6 +10432,35 @@ static int __ath11k_mac_register(struct
+ 	wiphy_ext_feature_set(ar->hw->wiphy, NL80211_EXT_FEATURE_STA_TX_PWR);
+ 	wiphy_ext_feature_set(ar->hw->wiphy, NL80211_EXT_FEATURE_BSS_COLOR);
+ 
++	if (test_bit(WMI_TLV_SERVICE_PEER_TID_CONFIGS_SUPPORT, ar->ab->wmi_ab.svc_map)) {
++		ar->hw->wiphy->tid_config_support.vif |=
++			BIT(NL80211_TID_CONFIG_ATTR_NOACK) |
++			BIT(NL80211_TID_CONFIG_ATTR_RETRY_LONG) |
++			BIT(NL80211_TID_CONFIG_ATTR_AMPDU_CTRL) |
++			BIT(NL80211_TID_CONFIG_ATTR_AMPDU_COUNT) |
++			BIT(NL80211_TID_CONFIG_ATTR_AMSDU_CTRL) |
++			BIT(NL80211_TID_CONFIG_ATTR_AMSDU_COUNT) |
++			BIT(NL80211_TID_CONFIG_ATTR_TX_RATE) |
++			BIT(NL80211_TID_CONFIG_ATTR_TX_RATE_TYPE);
++
++		if (test_bit(WMI_TLV_SERVICE_EXT_PEER_TID_CONFIGS_SUPPORT,
++			     ar->ab->wmi_ab.svc_map)) {
++			ar->hw->wiphy->tid_config_support.vif |=
++				BIT(NL80211_TID_CONFIG_ATTR_RTSCTS_CTRL);
++		}
++
++		ar->hw->wiphy->tid_config_support.peer =
++			ar->hw->wiphy->tid_config_support.vif;
++		ar->hw->wiphy->max_data_retry_count = ATH11K_MAX_RETRY_COUNT;
++	} else {
++		ar->ops->set_tid_config = NULL;
++	}
++
++	if (test_bit(WMI_TLV_SERVICE_RTSCTS_FOR_UNICAST_MGMT_SUPPORT,
++		     ar->ab->wmi_ab.svc_map))
++		wiphy_ext_feature_set(ar->hw->wiphy,
++				      NL80211_EXT_FEATURE_STA_MGMT_RTS_CTS);
++
+ 	if (test_bit(WMI_TLV_SERVICE_SCAN_PHYMODE_SUPPORT,
+ 		     ar->ab->wmi_ab.svc_map))
+ 		wiphy_ext_feature_set(ar->hw->wiphy,
+--- a/drivers/net/wireless/ath/ath11k/wmi.c
++++ b/drivers/net/wireless/ath/ath11k/wmi.c
+@@ -724,6 +724,55 @@ int ath11k_wmi_qos_null_send(struct ath1
+ 	return ret;
+ }
+ 
++int ath11k_wmi_set_per_peer_per_tid_cfg(struct ath11k *ar,
++					const struct wmi_per_peer_per_tid_cfg_arg *arg)
++{
++	struct ath11k_pdev_wmi *wmi = ar->wmi;
++	struct wmi_peer_per_tid_cfg_cmd *cmd;
++	struct sk_buff *skb = NULL;
++	int ret = 0;
++
++	skb = ath11k_wmi_alloc_skb(wmi->wmi_ab, sizeof(*cmd));
++	if (!skb)
++		return -ENOMEM;
++
++	memset(skb->data, 0, sizeof(*cmd));
++
++	cmd = (struct wmi_peer_per_tid_cfg_cmd *)skb->data;
++	cmd->tlv_header = FIELD_PREP(WMI_TLV_TAG, WMI_TAG_PEER_TID_CONFIGURATIONS_CMD) |
++			  FIELD_PREP(WMI_TLV_LEN, sizeof(*cmd) - TLV_HDR_SIZE);
++	cmd->vdev_id = arg->vdev_id;
++	ether_addr_copy(cmd->peer_macaddr.addr, arg->peer_macaddr.addr);
++	cmd->tid = arg->tid;
++	cmd->ack_policy = arg->ack_policy;
++	cmd->aggr_control = arg->aggr_control;
++	cmd->rate_control = arg->rate_ctrl;
++	cmd->retry_count = arg->retry_count;
++	cmd->rcode_flags = arg->rcode_flags;
++	cmd->ext_tid_cfg_bitmap = arg->ext_tid_cfg_bitmap;
++	cmd->rtscts_ctrl = arg->rtscts_ctrl;
++	cmd->max_num_mpdu_in_ppdu = arg->max_num_mpdu_in_ppdu;
++	cmd->max_num_msdu_in_mpdu = arg->max_num_msdu_in_mpdu;
++
++	ath11k_dbg(ar->ab, ATH11K_DBG_WMI,
++		   "wmi noack tid %d vdev id %d ack_policy %d aggr %u rate_ctrl %u rcflag 0x%x retry_count %d\n rtscts %d ext_tid_cfg_bitmap %d mac_addr %pM ampdu_count %d amsdu count %d\n",
++		   arg->tid, arg->vdev_id, arg->ack_policy, arg->aggr_control,
++		   arg->rate_ctrl, arg->rcode_flags, arg->retry_count, arg->rtscts_ctrl,
++		   arg->ext_tid_cfg_bitmap, arg->peer_macaddr.addr,
++		   arg->max_num_mpdu_in_ppdu, arg->max_num_msdu_in_mpdu);
++
++	ret = ath11k_wmi_cmd_send(ar->wmi, skb, WMI_PEER_TID_CONFIGURATIONS_CMDID);
++	if (ret) {
++		ath11k_warn(ar->ab,
++			    "failed to submit WMI_PEER_TID_CONFIGURATIONS_CMDID cmd\n");
++		dev_kfree_skb(skb);
++	}
++
++	ath11k_dbg(ar->ab, ATH11K_DBG_WMI,
++		   "wmi peer tid configuration cmd sent successfully\n");
++	return ret;
++}
++
+ int ath11k_wmi_vdev_create(struct ath11k *ar, u8 *macaddr,
+ 			   struct vdev_create_params *param)
+ {
+@@ -4380,6 +4429,7 @@ ath11k_wmi_copy_resource_config(struct w
+ 	wmi_cfg->host_service_flags &= ~(1 << WMI_RSRC_CFG_HOST_SERVICE_FLAG_REG_CC_EXT_SUPPORT_BIT);
+ 	wmi_cfg->host_service_flags |= tg_cfg->is_reg_cc_ext_event_supported <<
+ 				       WMI_RSRC_CFG_HOST_SERVICE_FLAG_REG_CC_EXT_SUPPORT_BIT;
++	wmi_cfg->flag1 |= tg_cfg->peer_tid_ext;
+ 	wmi_cfg->smart_ant_cap = 1;
+ }
+ 
+--- a/drivers/net/wireless/ath/ath11k/wmi.h
++++ b/drivers/net/wireless/ath/ath11k/wmi.h
+@@ -2189,6 +2189,7 @@ enum wmi_tlv_service {
+ 	WMI_TLV_SERVICE_REG_CC_EXT_EVENT_SUPPORT = 281,
+ 	WMI_TLV_SERVICE_DCS_AWGN_INT_SUPPORT = 286,
+ 	WMI_TLV_SERVICE_DYN_NSS_MASK_SUPPORT = 303,
++	WMI_TLV_SERVICE_RTSCTS_FOR_UNICAST_MGMT_SUPPORT = 309,
+ 
+ 	WMI_MAX_EXT2_SERVICE
+ };
+@@ -2229,6 +2230,7 @@ enum {
+ #define WMI_PEER_SET_MIN_TX_RATE                        0x12
+ #define WMI_PEER_SET_DEFAULT_ROUTING                    0x13
+ #define WMI_PEER_PARAM_DYN_NSS_EN_MASK                  0x24
++#define WMI_PEER_PARAM_EN_RTSCTS_FOR_UNICAST_MGMT	0x25
+ 
+ /* slot time long */
+ #define WMI_VDEV_SLOT_TIME_LONG         0x1
+@@ -2410,6 +2412,7 @@ struct wmi_init_cmd {
+ #define WMI_RSRC_CFG_FLAG1_BSS_CHANNEL_INFO_64 BIT(5)
+ #define WMI_RSRC_CFG_FLAG1_ACK_RSSI BIT(18)
+ #define WMI_RSRC_CFG_HOST_SERVICE_FLAG_REG_CC_EXT_SUPPORT_BIT 4
++#define WMI_RSRC_CFG_FLAG_PEER_TID_EXT BIT(22)
+ 
+ struct wmi_resource_config {
+ 	u32 tlv_header;
+@@ -6178,6 +6181,7 @@ struct target_resource_config {
+ 	u32 num_msdu_desc;
+ 	u32 max_frag_entries;
+ 	u32 max_peer_ext_stats;
++	u32 peer_tid_ext;
+ 	u32 smart_ant_cap;
+ 	u32 bk_minfree;
+ 	u32 be_minfree;
+@@ -6404,6 +6408,78 @@ struct wmi_qos_null_tx_cmd {
+ 	u32 tx_params_valid;
+ } __packed;
+ 
++enum wmi_tid_aggr_control_conf {
++	WMI_TID_CONFIG_AGGR_CONTROL_IGNORE,
++	WMI_TID_CONFIG_AGGR_CONTROL_ENABLE,
++	WMI_TID_CONFIG_AGGR_CONTROL_DISABLE,
++};
++
++enum wmi_noack_tid_conf {
++	WMI_NOACK_TID_CONFIG_IGNORE_ACK_POLICY,
++	WMI_PEER_TID_CONFIG_ACK,
++	WMI_PEER_TID_CONFIG_NOACK,
++};
++
++enum wmi_tid_rate_ctrl_conf {
++	WMI_TID_CONFIG_RATE_CONTROL_IGNORE,
++	WMI_TID_CONFIG_RATE_CONTROL_AUTO,
++	WMI_TID_CONFIG_RATE_CONTROL_FIXED_RATE,
++	WMI_TID_CONFIG_RATE_CONTROL_DEFAULT_LOWEST_RATE,
++	WMI_PEER_TID_CONFIG_RATE_UPPER_CAP,
++};
++
++enum wmi_tid_rtscts_control_conf {
++	WMI_TID_CONFIG_RTSCTS_CTRL_RESET,
++	WMI_TID_CONFIG_RTSCTS_CTRL_DISABLE,
++	WMI_TID_CONFIG_RTSCTS_CTRL_ENABLE,
++};
++
++enum wmi_ext_tid_config_map {
++	WMI_EXT_TID_RTS_CTS_CONFIG =			BIT(0),
++	WMI_PEER_TID_MAX_NUM_MPDU_IN_PPDU_VALID =	BIT(1),
++	WMI_PEER_TID_MAX_NUM_MSDU_IN_MPDU_VALID =	BIT(2),
++};
++
++struct wmi_per_peer_per_tid_cfg_arg {
++	u32 vdev_id;
++	struct wmi_mac_addr peer_macaddr;
++	u32 tid;
++	enum wmi_noack_tid_conf ack_policy;
++	enum wmi_tid_aggr_control_conf aggr_control;
++	enum wmi_tid_aggr_control_conf aggr_control_ampdu;
++	enum wmi_tid_aggr_control_conf aggr_control_amsdu;
++	u8 rate_ctrl;
++	u32 rcode_rcflags;
++	u32 retry_count;
++	u32 rcode_flags;
++	u32 ext_tid_cfg_bitmap;
++	u32 rtscts_ctrl;
++	u32 max_num_mpdu_in_ppdu;
++	u32 max_num_msdu_in_mpdu;
++};
++
++struct wmi_peer_per_tid_cfg_cmd {
++	u32 tlv_header;
++	u32 vdev_id;
++	struct wmi_mac_addr peer_macaddr;
++	u32 tid;
++
++	/* see enum wmi_noack_tid_conf */
++	u32 ack_policy;
++	/* see enum wmi_tid_aggr_control_conf */
++	u32 aggr_control;
++	/* see enum wmi_tid_rate_ctrl_conf */
++	u32 rate_control;
++	u32 rcode_flags;
++	u32 retry_count;
++	/* See enum wmi_ext_tid_config_map */
++	u32 ext_tid_cfg_bitmap;
++	/* see enum wmi_tid_rtscts_control_conf */
++	u32 rtscts_ctrl;
++	u32 max_num_mpdu_in_ppdu;
++	u32 max_num_msdu_in_mpdu;
++} __packed;
++
+ enum wmi_dblog_param {
+ 	WMI_DEBUG_LOG_PARAM_LOG_LEVEL = 0x1,
+ 	WMI_DEBUG_LOG_PARAM_VDEV_ENABLE,
+@@ -6740,6 +6816,8 @@ int ath11k_wmi_mgmt_send(struct ath11k *
+ 			 struct sk_buff *frame, bool tx_params_valid);
+ int ath11k_wmi_qos_null_send(struct ath11k *ar, u32 vdev_id, u32 buf_id,
+ 			     struct sk_buff *frame);
++int ath11k_wmi_set_per_peer_per_tid_cfg(struct ath11k *ar,
++					const struct wmi_per_peer_per_tid_cfg_arg *arg);
+ int ath11k_wmi_bcn_tmpl(struct ath11k *ar, u32 vdev_id,
+ 			struct ieee80211_mutable_offsets *offs,
+ 			struct sk_buff *bcn, u32 ema_param);

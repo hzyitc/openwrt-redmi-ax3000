@@ -1,0 +1,512 @@
+From 2758579734a12c00eb40a6e455efd04e59e44721 Mon Sep 17 00:00:00 2001
+From: Aditya Kumar Singh <quic_adisi@quicinc.com>
+Date: Tue, 28 Dec 2021 13:14:06 +0530
+Subject: [PATCH] ath11k: add get_txpower mac ops
+
+Currently, driver does not support get_txpower mac ops because of which
+cfg80211 returns vif->bss_conf.txpower to user space. bss_conf.txpower
+gets its value from ieee80211_channel->max_reg_power. However, the
+final txpower is dependent on few other parameters apart from max
+regulatory supported power.
+
+Add get_txpower to get the Tx power from FW and return it accordingly.
+
+Signed-off-by: Aditya Kumar Singh <quic_adisi@quicinc.com>
+---
+ drivers/net/wireless/ath/ath11k/core.c    |  49 +++++++++++++
+ drivers/net/wireless/ath/ath11k/core.h    |  13 +++-
+ drivers/net/wireless/ath/ath11k/debugfs.c | 111 +++++++-----------------------
+ drivers/net/wireless/ath/ath11k/debugfs.h |   6 +-
+ drivers/net/wireless/ath/ath11k/mac.c     |  96 ++++++++++++++++++++++++++
+ drivers/net/wireless/ath/ath11k/wmi.c     |  49 ++++++++++++-
+ 6 files changed, 229 insertions(+), 95 deletions(-)
+
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -531,6 +531,55 @@ static const struct ath11k_num_vdevs_pee
+ 	},
+ };
+ 
++void ath11k_fw_stats_pdevs_free(struct list_head *head)
++{
++	struct ath11k_fw_stats_pdev *i, *tmp;
++
++	list_for_each_entry_safe(i, tmp, head, list) {
++		list_del(&i->list);
++		kfree(i);
++	}
++}
++
++static void ath11k_fw_stats_vdevs_free(struct list_head *head)
++{
++	struct ath11k_fw_stats_vdev *i, *tmp;
++
++	list_for_each_entry_safe(i, tmp, head, list) {
++		list_del(&i->list);
++		kfree(i);
++	}
++}
++
++void ath11k_fw_stats_bcn_free(struct list_head *head)
++{
++	struct ath11k_fw_stats_bcn *i, *tmp;
++
++	list_for_each_entry_safe(i, tmp, head, list) {
++		list_del(&i->list);
++		kfree(i);
++	}
++}
++
++void ath11k_fw_stats_init(struct ath11k *ar)
++{
++	INIT_LIST_HEAD(&ar->fw_stats_pdevs);
++	init_completion(&ar->fw_stats_complete);
++}
++
++void ath11k_fw_stats_reset(struct ath11k *ar)
++{
++	ath11k_fw_stats_pdevs_free(&ar->fw_stats_pdevs);
++	ath11k_fw_stats_vdevs_free(&ar->debug.fw_stats.vdevs);
++}
++
++void ath11k_fw_stats_free(struct ath11k_fw_stats *stats)
++{
++	ath11k_fw_stats_pdevs_free(&stats->pdevs);
++	ath11k_fw_stats_vdevs_free(&stats->vdevs);
++	ath11k_fw_stats_bcn_free(&stats->bcn);
++}
++
+ int ath11k_core_suspend(struct ath11k_base *ab)
+ {
+ 	int ret;
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -636,8 +636,6 @@ struct ath11k_debug {
+ 	struct ath11k_dbg_htt_stats htt_stats;
+ 	u32 extd_tx_stats;
+ 	struct ath11k_fw_stats fw_stats;
+-	struct completion fw_stats_complete;
+-	bool fw_stats_done;
+ 	u32 extd_rx_stats;
+ 	u32 pktlog_filter;
+ 	u32 pktlog_mode;
+@@ -878,6 +876,11 @@ struct ath11k {
+ 	struct cfg80211_chan_def awgn_chandef;
+ 	u32 chan_bw_interference_bitmap;
+ 	bool awgn_intf_handling_in_prog;
++
++	/* fw pdev_stats can be requested by get_txpower mac ops too */
++	struct list_head fw_stats_pdevs;
++	struct completion fw_stats_complete;
++	bool fw_stats_done;
+ };
+ 
+ struct ath11k_band_cap {
+@@ -1330,6 +1333,12 @@ enum ath11k_fw_recovery_option {
+ 	ATH11K_FW_RECOVERY_ENABLE_SSR_ONLY,
+ };
+ 
++void ath11k_fw_stats_init(struct ath11k *ar);
++void ath11k_fw_stats_pdevs_free(struct list_head *head);
++void ath11k_fw_stats_bcn_free(struct list_head *head);
++void ath11k_fw_stats_reset(struct ath11k *ar);
++void ath11k_fw_stats_free(struct ath11k_fw_stats *stats);
++
+ extern bool ath11k_enable_smart_antenna;
+ 
+ static inline bool ath11k_smart_ant_enabled(struct ath11k *ar)
+--- a/drivers/net/wireless/ath/ath11k/debugfs.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs.c
+@@ -803,86 +803,29 @@ void ath11k_debug_aggr_size_config_init(
+ 						     &fops_amsdu_aggr_size);
+ }
+ 
+-static void ath11k_fw_stats_pdevs_free(struct list_head *head)
+-{
+-	struct ath11k_fw_stats_pdev *i, *tmp;
+-
+-	list_for_each_entry_safe(i, tmp, head, list) {
+-		list_del(&i->list);
+-		kfree(i);
+-	}
+-}
+-
+-static void ath11k_fw_stats_vdevs_free(struct list_head *head)
+-{
+-	struct ath11k_fw_stats_vdev *i, *tmp;
+-
+-	list_for_each_entry_safe(i, tmp, head, list) {
+-		list_del(&i->list);
+-		kfree(i);
+-	}
+-}
+-
+-static void ath11k_fw_stats_bcn_free(struct list_head *head)
+-{
+-	struct ath11k_fw_stats_bcn *i, *tmp;
+-
+-	list_for_each_entry_safe(i, tmp, head, list) {
+-		list_del(&i->list);
+-		kfree(i);
+-	}
+-}
+-
+ static void ath11k_debugfs_fw_stats_reset(struct ath11k *ar)
+ {
+ 	spin_lock_bh(&ar->data_lock);
+-	ar->debug.fw_stats_done = false;
+-	ath11k_fw_stats_pdevs_free(&ar->debug.fw_stats.pdevs);
+-	ath11k_fw_stats_vdevs_free(&ar->debug.fw_stats.vdevs);
++	ar->fw_stats_done = false;
++	ath11k_fw_stats_reset(ar);
+ 	spin_unlock_bh(&ar->data_lock);
+ }
+ 
+-void ath11k_debugfs_fw_stats_process(struct ath11k_base *ab, struct sk_buff *skb)
++void ath11k_debugfs_fw_stats_process(struct ath11k *ar, struct ath11k_fw_stats *stats)
+ {
+-	struct ath11k_fw_stats stats = {};
+-	struct ath11k *ar;
++	struct ath11k_base *ab = ar->ab;
+ 	struct ath11k_pdev *pdev;
+ 	bool is_end;
+ 	static unsigned int num_vdev, num_bcn;
+ 	size_t total_vdevs_started = 0;
+-	int i, ret;
+-
+-	INIT_LIST_HEAD(&stats.pdevs);
+-	INIT_LIST_HEAD(&stats.vdevs);
+-	INIT_LIST_HEAD(&stats.bcn);
+-
+-	ret = ath11k_wmi_pull_fw_stats(ab, skb, &stats);
+-	if (ret) {
+-		ath11k_warn(ab, "failed to pull fw stats: %d\n", ret);
+-		goto free;
+-	}
+-
+-	rcu_read_lock();
+-	ar = ath11k_mac_get_ar_by_pdev_id(ab, stats.pdev_id);
+-	if (!ar) {
+-		rcu_read_unlock();
+-		ath11k_warn(ab, "failed to get ar for pdev_id %d: %d\n",
+-			    stats.pdev_id, ret);
+-		goto free;
+-	}
+-
+-	spin_lock_bh(&ar->data_lock);
++	int i;
+ 
+-	if (stats.stats_id == WMI_REQUEST_PDEV_STAT) {
+-		list_splice_tail_init(&stats.pdevs, &ar->debug.fw_stats.pdevs);
+-		ar->debug.fw_stats_done = true;
+-		goto complete;
+-	}
++	/* WMI_REQUEST_PDEV_STAT request has been already processed. Hence, not doing it again */
+ 
+-	if (stats.stats_id == WMI_REQUEST_VDEV_STAT) {
+-		if (list_empty(&stats.vdevs)) {
++	if (stats->stats_id == WMI_REQUEST_VDEV_STAT) {
++		if (list_empty(&stats->vdevs)) {
+ 			ath11k_warn(ab, "empty vdev stats");
+-			goto complete;
++			return;
+ 		}
+ 		/* FW sends all the active VDEV stats irrespective of PDEV,
+ 		 * hence limit until the count of all VDEVs started
+@@ -895,43 +838,34 @@ void ath11k_debugfs_fw_stats_process(str
+ 
+ 		is_end = ((++num_vdev) == total_vdevs_started);
+ 
+-		list_splice_tail_init(&stats.vdevs,
++		list_splice_tail_init(&stats->vdevs,
+ 				      &ar->debug.fw_stats.vdevs);
+ 
+ 		if (is_end) {
+-			ar->debug.fw_stats_done = true;
++			ar->fw_stats_done = true;
+ 			num_vdev = 0;
+ 		}
+-		goto complete;
++		return;
+ 	}
+ 
+-	if (stats.stats_id == WMI_REQUEST_BCN_STAT) {
+-		if (list_empty(&stats.bcn)) {
++	if (stats->stats_id == WMI_REQUEST_BCN_STAT) {
++		if (list_empty(&stats->bcn)) {
+ 			ath11k_warn(ab, "empty bcn stats");
+-			goto complete;
++			return;
+ 		}
+ 		/* Mark end until we reached the count of all started VDEVs
+ 		 * within the PDEV
+ 		 */
+ 		is_end = ((++num_bcn) == ar->num_started_vdevs);
+ 
+-		list_splice_tail_init(&stats.bcn,
++		list_splice_tail_init(&stats->bcn,
+ 				      &ar->debug.fw_stats.bcn);
+ 
+ 		if (is_end) {
+-			ar->debug.fw_stats_done = true;
++			ar->fw_stats_done = true;
+ 			num_bcn = 0;
+ 		}
+ 	}
+-complete:
+-	complete(&ar->debug.fw_stats_complete);
+-	rcu_read_unlock();
+-	spin_unlock_bh(&ar->data_lock);
+-
+-free:
+-	ath11k_fw_stats_pdevs_free(&stats.pdevs);
+-	ath11k_fw_stats_vdevs_free(&stats.vdevs);
+-	ath11k_fw_stats_bcn_free(&stats.bcn);
+ }
+ 
+ static int ath11k_debugfs_fw_stats_request(struct ath11k *ar,
+@@ -952,7 +886,7 @@ static int ath11k_debugfs_fw_stats_reque
+ 
+ 	ath11k_debugfs_fw_stats_reset(ar);
+ 
+-	reinit_completion(&ar->debug.fw_stats_complete);
++	reinit_completion(&ar->fw_stats_complete);
+ 
+ 	ret = ath11k_wmi_send_stats_request_cmd(ar, req_param);
+ 
+@@ -963,7 +897,7 @@ static int ath11k_debugfs_fw_stats_reque
+ 	}
+ 
+ 	time_left =
+-	wait_for_completion_timeout(&ar->debug.fw_stats_complete,
++	wait_for_completion_timeout(&ar->fw_stats_complete,
+ 				    1 * HZ);
+ 	if (!time_left)
+ 		return -ETIMEDOUT;
+@@ -973,7 +907,7 @@ static int ath11k_debugfs_fw_stats_reque
+ 			break;
+ 
+ 		spin_lock_bh(&ar->data_lock);
+-		if (ar->debug.fw_stats_done) {
++		if (ar->fw_stats_done) {
+ 			spin_unlock_bh(&ar->data_lock);
+ 			break;
+ 		}
+@@ -2231,11 +2165,12 @@ void ath11k_debugfs_fw_stats_init(struct
+ 	debugfs_create_file("beacon_stats", 0600, fwstats_dir, ar,
+ 			    &fops_bcn_stats);
+ 
+-	INIT_LIST_HEAD(&ar->debug.fw_stats.pdevs);
+ 	INIT_LIST_HEAD(&ar->debug.fw_stats.vdevs);
+ 	INIT_LIST_HEAD(&ar->debug.fw_stats.bcn);
+ 
+-	init_completion(&ar->debug.fw_stats_complete);
++	/* pdevs list and fw_stats_complete completion is already initialised
++	 * in ath11k_fw_stats_init
++	 */
+ }
+ 
+ static ssize_t ath11k_write_pktlog_filter(struct file *file,
+--- a/drivers/net/wireless/ath/ath11k/debugfs.h
++++ b/drivers/net/wireless/ath/ath11k/debugfs.h
+@@ -239,7 +239,7 @@ int ath11k_debugfs_pdev_create(struct at
+ void ath11k_debugfs_pdev_destroy(struct ath11k_base *ab);
+ int ath11k_debugfs_register(struct ath11k *ar);
+ void ath11k_debugfs_unregister(struct ath11k *ar);
+-void ath11k_debugfs_fw_stats_process(struct ath11k_base *ab, struct sk_buff *skb);
++void ath11k_debugfs_fw_stats_process(struct ath11k *ar, struct ath11k_fw_stats *stats);
+ 
+ void ath11k_debugfs_fw_stats_init(struct ath11k *ar);
+ void ath11k_smart_ant_debugfs_init(struct ath11k *ar);
+@@ -334,8 +334,8 @@ static inline void ath11k_debugfs_unregi
+ {
+ }
+ 
+-static inline void ath11k_debugfs_fw_stats_process(struct ath11k_base *ab,
+-						   struct sk_buff *skb)
++static inline void ath11k_debugfs_fw_stats_process(struct ath11k *ar,
++						   struct ath11k_fw_stats *stats)
+ {
+ }
+ 
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -10679,6 +10679,96 @@ out:
+ 	return ret;
+ }
+ 
++static int ath11k_fw_stats_request(struct ath11k *ar,
++				  struct stats_request_params *req_param)
++{
++	struct ath11k_base *ab = ar->ab;
++	unsigned long time_left;
++	int ret;
++
++	lockdep_assert_held(&ar->conf_mutex);
++
++	spin_lock_bh(&ar->data_lock);
++	ar->fw_stats_done = false;
++	ath11k_fw_stats_pdevs_free(&ar->fw_stats_pdevs);
++	spin_unlock_bh(&ar->data_lock);
++
++	reinit_completion(&ar->fw_stats_complete);
++
++	ret = ath11k_wmi_send_stats_request_cmd(ar, req_param);
++	if (ret) {
++		ath11k_warn(ab, "could not request fw stats (%d)\n",
++			    ret);
++		return ret;
++	}
++
++	time_left =
++	wait_for_completion_timeout(&ar->fw_stats_complete,
++				    1 * HZ);
++
++	if (!time_left)
++		return -ETIMEDOUT;
++
++	return 0;
++}
++
++static int ath11k_mac_op_get_txpower(struct ieee80211_hw *hw,
++				     struct ieee80211_vif *vif,
++				     int *dbm)
++{
++	struct ath11k *ar = hw->priv;
++	struct ath11k_base *ab = ar->ab;
++	struct stats_request_params req_param;
++	struct ath11k_fw_stats_pdev *pdev;
++	int ret;
++
++	/* Final Tx power is minimum of Target Power, CTL power, Regulatory
++	 * Power, PSD EIRP Power. We just know the Regulatory power from the
++	 * regulatory rules obtained. FW knows all these power and sets the min
++	 * of these. Hence, we request the FW pdev stats in which FW reports
++	 * the minimum of all vdev's channel Tx power.
++	 */
++	mutex_lock(&ar->conf_mutex);
++
++	if (ar->state != ATH11K_STATE_ON) {
++		goto err_unlock;
++	}
++
++	req_param.pdev_id = ar->pdev->pdev_id;
++	req_param.vdev_id = 0;
++	req_param.stats_id = WMI_REQUEST_PDEV_STAT;
++
++	ret = ath11k_fw_stats_request(ar, &req_param);
++	if (ret) {
++		ath11k_warn(ab, "failed to request fw pdev stats: %d\n", ret);
++		goto err_unlock;
++	}
++
++	spin_lock_bh(&ar->data_lock);
++	pdev = list_first_entry_or_null(&ar->fw_stats_pdevs,
++					struct ath11k_fw_stats_pdev, list);
++	if (!pdev) {
++		spin_unlock_bh(&ar->data_lock);
++		goto err_unlock;
++	}
++
++	/* tx power is set as 2 units per dBm in FW. */
++	*dbm = pdev->chan_tx_power/2;
++
++	spin_unlock_bh(&ar->data_lock);
++	mutex_unlock(&ar->conf_mutex);
++
++	ath11k_dbg(ar->ab, ATH11K_DBG_MAC, "%s: txpower: %d from fw\n", __func__, *dbm);
++	return 0;
++
++err_unlock:
++	mutex_unlock(&ar->conf_mutex);
++	/* We didn't get txpower from FW. Hence, relying on vif->bss_conf.txpower */
++	*dbm = vif->bss_conf.txpower;
++	ath11k_dbg(ar->ab, ATH11K_DBG_MAC, "%s: txpower: %d from bss_conf\n", __func__, vif->bss_conf.txpower);
++	return 0;
++}
++
+ static const struct ieee80211_ops ath11k_ops = {
+ 	.tx				= ath11k_mac_op_tx,
+ 	.start                          = ath11k_mac_op_start,
+@@ -10724,6 +10814,7 @@ static const struct ieee80211_ops ath11k
+ #ifdef CPTCFG_MAC80211_MESH
+ 	.config_mesh_offload_path	= ath11k_mac_op_config_mesh_offload_path,
+ #endif
++	.get_txpower                    = ath11k_mac_op_get_txpower,
+ };
+ 
+ static void ath11k_mac_update_ch_list(struct ath11k *ar,
+@@ -11483,6 +11574,8 @@ int ath11k_mac_allocate(struct ath11k_ba
+ 		ar->monitor_vdev_id = -1;
+ 		ar->monitor_vdev_created = false;
+ 		ar->monitor_started = false;
++
++		ath11k_fw_stats_init(ar);
+ 	}
+ 
+ 	return 0;
+--- a/drivers/net/wireless/ath/ath11k/wmi.c
++++ b/drivers/net/wireless/ath/ath11k/wmi.c
+@@ -7418,7 +7418,7 @@ void ath11k_wmi_fw_stats_fill(struct ath
+ 	spin_lock_bh(&ar->data_lock);
+ 
+ 	if (stats_id == WMI_REQUEST_PDEV_STAT) {
+-		pdev = list_first_entry_or_null(&fw_stats->pdevs,
++		pdev = list_first_entry_or_null(&ar->fw_stats_pdevs,
+ 						struct ath11k_fw_stats_pdev, list);
+ 		if (!pdev) {
+ 			ath11k_warn(ar->ab, "failed to get pdev stats\n");
+@@ -8763,7 +8763,52 @@ static void ath11k_peer_assoc_conf_event
+ 
+ static void ath11k_update_stats_event(struct ath11k_base *ab, struct sk_buff *skb)
+ {
+-	ath11k_debugfs_fw_stats_process(ab, skb);
++	struct ath11k_fw_stats stats = {};
++	struct ath11k *ar;
++	int ret;
++
++	INIT_LIST_HEAD(&stats.pdevs);
++	INIT_LIST_HEAD(&stats.vdevs);
++	INIT_LIST_HEAD(&stats.bcn);
++
++	ret = ath11k_wmi_pull_fw_stats(ab, skb, &stats);
++	if (ret) {
++		ath11k_warn(ab, "failed to pull fw stats: %d\n", ret);
++		goto free;
++	}
++
++	rcu_read_lock();
++	ar = ath11k_mac_get_ar_by_pdev_id(ab, stats.pdev_id);
++	if (!ar) {
++		rcu_read_unlock();
++		ath11k_warn(ab, "failed to get ar for pdev_id %d: %d\n",
++			    stats.pdev_id, ret);
++		goto free;
++	}
++
++	spin_lock_bh(&ar->data_lock);
++
++	/* WMI_REQUEST_PDEV_STAT can be requested via .get_txpower mac ops or via
++	 * debugfs fw stats. Therfore, processing it separately.
++	 */
++	if (stats.stats_id == WMI_REQUEST_PDEV_STAT) {
++		list_splice_tail_init(&stats.pdevs, &ar->fw_stats_pdevs);
++		ar->fw_stats_done = true;
++		goto complete;
++	}
++
++	/* WMI_REQUEST_VDEV_STAT and WMI_REQUEST_BCN_STAT are currently requested
++	 * only via debugfs fw stats. Hence, processing these two in debugfs context
++	 */
++	ath11k_debugfs_fw_stats_process(ar, &stats);
++
++complete:
++	complete(&ar->fw_stats_complete);
++	rcu_read_unlock();
++	spin_unlock_bh(&ar->data_lock);
++
++free:
++	ath11k_fw_stats_free(&stats);
+ }
+ 
+ /* PDEV_CTL_FAILSAFE_CHECK_EVENT is received from FW when the frequency scanned

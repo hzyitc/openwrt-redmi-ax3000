@@ -1,0 +1,160 @@
+From b783459a2ede8bbb083ea9c6c2de0294453f23c9 Mon Sep 17 00:00:00 2001
+From: Tamizh Chelvam <tamizhr@codeaurora.org>
+Date: Mon, 26 Jul 2021 12:37:25 +0530
+Subject: [PATCH] ath11k: Add spectral scan support for 160mhz
+
+Add spectral scan 160mhz support for all chipsets.
+There are two types of 160mhz support mentioned below
+1. Fragmented approach
+2. Single event approach
+In this fragmented approach, single 160mhz will be splitted
+as two 80mhz buffer. First buffer will contain spectral scan
+buffer or primary 80 and the second buffer will contain
+secondary 80 and here cfreq1 and cfreq2 will be mentioned.
+In case of 160mhz on 36th channel will contain cfreq1 as 5210
+and cfreq2 as 5290. Chipsets which support this approach are
+IPQ8074/IPQ6018.
+
+A boolean parameter(is_primary) introduced to notify this two
+different buffer to userspace tool by checking cfreq2 value.
+
+In the 2nd approach each buffer will contain spectral scan
+result for whole 160mhz by mentioning cfreq1 as 5250 which
+is center frequency of whole 160mhz. And the new two parameters
+will be false for this approach. Chipsets which support this
+approach are QCN9074/QCN6122.
+
+Signed-off-by: Tamizh Chelvam <tamizhr@codeaurora.org>
+---
+ drivers/net/wireless/ath/ath11k/core.c     | 5 +++++
+ drivers/net/wireless/ath/ath11k/hw.h       | 1 +
+ drivers/net/wireless/ath/ath11k/spectral.c | 9 +++++++++
+ drivers/net/wireless/ath/ath11k/spectral.h | 1 +
+ drivers/net/wireless/ath/spectral_common.h | 2 ++
+ 5 files changed, 18 insertions(+)
+
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -93,6 +93,7 @@ static const struct ath11k_hw_params ath
+ 		.spectral_fft_pad_sz = 2,
+ 		.spectral_max_fft_bins = 512,
+ 		.spectral_fft_hdr_len = 16,
++		.spectral_fragment_160mhz = true,
+ 		.num_dscp_tid_map_tbl = HAL_DSCP_TID_MAP_TBL_NUM_ENTRIES_MAX,
+ 
+ 		.interface_modes = BIT(NL80211_IFTYPE_STATION) |
+@@ -153,6 +154,7 @@ static const struct ath11k_hw_params ath
+ 		.spectral_fft_sz = 4,
+ 		.spectral_max_fft_bins = 512,
+ 		.spectral_fft_hdr_len = 16,
++		.spectral_fragment_160mhz = true,
+ 		.num_dscp_tid_map_tbl = HAL_DSCP_TID_MAP_TBL_NUM_ENTRIES_MAX,
+ 
+ 		.interface_modes = BIT(NL80211_IFTYPE_STATION) |
+@@ -266,6 +268,7 @@ static const struct ath11k_hw_params ath
+ 		.spectral_max_fft_bins = 1024,
+ 		.spectral_summary_pad_sz = 16,
+ 		.spectral_fft_hdr_len = 24,
++		.spectral_fragment_160mhz = false,
+ 		.reo_dest_ring_map_shift = HAL_REO_DEST_RING_CTRL_HASH_RING_SHIFT,
+ 		.ce_fwlog_enable = true,
+ 		.fwmem_mode_change = true,
+@@ -329,6 +332,7 @@ static const struct ath11k_hw_params ath
+ 		.spectral_max_fft_bins = 1024,
+ 		.spectral_summary_pad_sz = 16,
+ 		.spectral_fft_hdr_len = 24,
++		.spectral_fragment_160mhz = false,
+ 		.reo_dest_ring_map_shift = HAL_IPQ5018_REO_DEST_RING_CTRL_HASH_RING_SHIFT,
+ 		.ce_fwlog_enable = false,
+ 		.fwmem_mode_change = false,
+@@ -383,6 +387,7 @@ static const struct ath11k_hw_params ath
+ 		.spectral_max_fft_bins = 1024,
+ 		.spectral_summary_pad_sz = 16,
+ 		.spectral_fft_hdr_len = 24,
++		.spectral_fragment_160mhz = false,
+ 		.reo_dest_ring_map_shift = HAL_IPQ5018_REO_DEST_RING_CTRL_HASH_RING_SHIFT,
+ 		.ce_fwlog_enable = false,
+ 		.cold_boot_calib = true,
+--- a/drivers/net/wireless/ath/ath11k/hw.h
++++ b/drivers/net/wireless/ath/ath11k/hw.h
+@@ -192,6 +192,7 @@ struct ath11k_hw_params {
+ 	u8 spectral_summary_pad_sz;
+ 	u8 spectral_fft_hdr_len;
+ 	u32 spectral_max_fft_bins;
++	bool spectral_fragment_160mhz;
+ 	bool credit_flow;
+ 	bool full_monitor_mode;
+ 
+--- a/drivers/net/wireless/ath/ath11k/spectral.c
++++ b/drivers/net/wireless/ath/ath11k/spectral.c
+@@ -30,6 +30,7 @@
+ #define ATH11K_SPECTRAL_20MHZ			20
+ #define ATH11K_SPECTRAL_40MHZ			40
+ #define ATH11K_SPECTRAL_80MHZ			80
++#define ATH11K_SPECTRAL_160MHZ			160
+ 
+ #define ATH11K_SPECTRAL_SIGNATURE		0xFA
+ 
+@@ -183,6 +184,8 @@ static int ath11k_spectral_scan_trigger(
+ 	if (ar->spectral.mode == ATH11K_SPECTRAL_DISABLED)
+ 		return 0;
+ 
++	ar->spectral.is_primary = true;
++
+ 	ret = ath11k_wmi_vdev_spectral_enable(ar, arvif->vdev_id,
+ 					      ATH11K_WMI_SPECTRAL_TRIGGER_CMD_CLEAR,
+ 					      ATH11K_WMI_SPECTRAL_ENABLE_CMD_ENABLE);
+@@ -582,6 +585,7 @@ int ath11k_spectral_process_fft(struct a
+ 	u8 chan_width_mhz, bin_sz;
+ 	int ret;
+ 	u32 check_length;
++	bool fragment_sample = false;
+ 
+ 	lockdep_assert_held(&ar->spectral.lock);
+ 
+@@ -635,6 +639,11 @@ int ath11k_spectral_process_fft(struct a
+ 	case ATH11K_SPECTRAL_80MHZ:
+ 		fft_sample->chan_width_mhz = chan_width_mhz;
+ 		break;
++	case ATH11K_SPECTRAL_160MHZ:
++		fft_sample->chan_width_mhz = chan_width_mhz;
++		if (ab->hw_params.spectral_fragment_160mhz)
++			fragment_sample = true;
++		break;
+ 	default:
+ 		ath11k_warn(ab, "invalid channel width %d\n", chan_width_mhz);
+ 		return -EINVAL;
+@@ -659,6 +668,13 @@ int ath11k_spectral_process_fft(struct a
+ 	freq = summary->meta.freq2;
+ 	fft_sample->freq2 = __cpu_to_be16(freq);
+ 
++	/* If freq2 is available then the spectral scan results are fragmented as primary and secondary */
++	if (fragment_sample && freq) {
++		fft_sample->is_primary = ar->spectral.is_primary;
++		/* We have to toggle the is_primary to handle the next report */
++		ar->spectral.is_primary = !ar->spectral.is_primary;
++	}
++
+ 	ath11k_spectral_parse_fft(fft_sample->data, fft_report->bins, num_bins,
+ 				  ab->hw_params.spectral_fft_sz);
+ 
+--- a/drivers/net/wireless/ath/ath11k/spectral.h
++++ b/drivers/net/wireless/ath/ath11k/spectral.h
+@@ -35,6 +35,7 @@ struct ath11k_spectral {
+ 	u16 count;
+ 	u8 fft_size;
+ 	bool enabled;
++	bool is_primary;
+ };
+ 
+ #ifdef CPTCFG_ATH11K_SPECTRAL
+--- a/drivers/net/wireless/ath/spectral_common.h
++++ b/drivers/net/wireless/ath/spectral_common.h
+@@ -117,6 +117,7 @@ struct fft_sample_ath11k {
+ 	u8 chan_width_mhz;
+ 	s8 max_index;
+ 	u8 max_exp;
++	bool is_primary;
+ 	__be16 freq1;
+ 	__be16 freq2;
+ 	__be16 max_magnitude;

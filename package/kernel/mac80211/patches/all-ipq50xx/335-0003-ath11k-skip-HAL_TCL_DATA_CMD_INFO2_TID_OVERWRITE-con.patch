@@ -1,0 +1,144 @@
+From c7bd857a315fb299e4c984be2f3720428477ae6e Mon Sep 17 00:00:00 2001
+From: Venkateswara Naralasetty <quic_vnaralas@quicinc.com>
+Date: Thu, 11 Nov 2021 11:14:08 +0530
+Subject: [PATCH] ath11k: skip HAL_TCL_DATA_CMD_INFO2_TID_OVERWRITE config
+
+Don't set HAL_TCL_DATA_CMD_INFO2_TID_OVERWRITE flag to TCL,
+HW only take care of tid classification if this flag is not set.
+
+Signed-off-by: Venkateswara Naralasetty <quic_vnaralas@quicinc.com>
+---
+ drivers/net/wireless/ath/ath11k/dp_tx.c  | 19 +------------------
+ drivers/net/wireless/ath/ath11k/hal_tx.c |  1 -
+ drivers/net/wireless/ath/ath11k/mac.c    |  2 ++
+ include/net/mac80211.h                   |  3 +++
+ net/mac80211/debugfs.c                   |  1 +
+ net/mac80211/wme.c                       |  3 +++
+ 6 files changed, 10 insertions(+), 19 deletions(-)
+
+diff --git a/drivers/net/wireless/ath/ath11k/dp_tx.c b/drivers/net/wireless/ath/ath11k/dp_tx.c
+index 5955ee7..ef51d62 100644
+--- a/drivers/net/wireless/ath/ath11k/dp_tx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_tx.c
+@@ -42,19 +42,6 @@ static void ath11k_dp_tx_encap_nwifi(struct sk_buff *skb)
+ 	hdr->frame_control &= ~__cpu_to_le16(IEEE80211_STYPE_QOS_DATA);
+ }
+ 
+-static u8 ath11k_dp_tx_get_tid(struct sk_buff *skb)
+-{
+-	struct ieee80211_hdr *hdr = (void *)skb->data;
+-	struct ath11k_skb_cb *cb = ATH11K_SKB_CB(skb);
+-
+-	if (cb->flags & ATH11K_SKB_HW_80211_ENCAP)
+-		return skb->priority & IEEE80211_QOS_CTL_TID_MASK;
+-	else if (!ieee80211_is_data_qos(hdr->frame_control))
+-		return HAL_DESC_REO_NON_QOS_TID;
+-	else
+-		return skb->priority & IEEE80211_QOS_CTL_TID_MASK;
+-}
+-
+ enum hal_encrypt_type ath11k_dp_tx_get_encrypt_type(u32 cipher)
+ {
+ 	switch (cipher) {
+@@ -133,7 +120,6 @@ int ath11k_dp_tx(struct ath11k *ar, struct ath11k_vif *arvif,
+ 		return -ENOTSUPP;
+ 
+ 	max_tx_ring = ab->hw_params.max_tx_ring;
+-	pool_id = skb_get_queue_mapping(skb) & (ATH11K_HW_MAX_QUEUES - 1);
+ 
+ 	/* Let the default ring selection be based on current processor
+ 	 * number, where one of the 3 tcl rings are selected based on
+@@ -149,6 +135,7 @@ int ath11k_dp_tx(struct ath11k *ar, struct ath11k_vif *arvif,
+  	}
+ #endif
+ 	ring_selector = smp_processor_id();
++	pool_id = ring_selector;
+ 
+ tcl_ring_sel:
+ 	tcl_ring_retry = false;
+@@ -234,10 +221,6 @@ tcl_ring_sel:
+ 	if (ieee80211_vif_is_mesh(arvif->vif))
+ 		ti.enable_mesh = true;
+ 
+-	ti.flags1 |= FIELD_PREP(HAL_TCL_DATA_CMD_INFO2_TID_OVERWRITE, 1);
+-
+-	ti.tid = ath11k_dp_tx_get_tid(skb);
+-
+ 	switch (ti.encap_type) {
+ 	case HAL_TCL_ENCAP_TYPE_NATIVE_WIFI:
+ 		if (arvif->vif->offload_flags & IEEE80211_OFFLOAD_ENCAP_ENABLED)
+diff --git a/drivers/net/wireless/ath/ath11k/hal_tx.c b/drivers/net/wireless/ath/ath11k/hal_tx.c
+index d3fa937..0c5f03c 100644
+--- a/drivers/net/wireless/ath/ath11k/hal_tx.c
++++ b/drivers/net/wireless/ath/ath11k/hal_tx.c
+@@ -64,7 +64,6 @@ void ath11k_hal_tx_cmd_desc_setup(struct ath11k_base *ab, void *cmd,
+ 		FIELD_PREP(HAL_TCL_DATA_CMD_INFO1_PKT_OFFSET, ti->pkt_offset);
+ 
+ 	tcl_cmd.info2 = ti->flags1 |
+-		FIELD_PREP(HAL_TCL_DATA_CMD_INFO2_TID, ti->tid) |
+ 		FIELD_PREP(HAL_TCL_DATA_CMD_INFO2_LMAC_ID, ti->lmac_id);
+ 
+ 	tcl_cmd.info3 = FIELD_PREP(HAL_TCL_DATA_CMD_INFO3_DSCP_TID_TABLE_IDX,
+diff --git a/drivers/net/wireless/ath/ath11k/mac.c b/drivers/net/wireless/ath/ath11k/mac.c
+index 7316452..6942ebb 100644
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -11049,6 +11049,8 @@ static int __ath11k_mac_register(struct ath11k *ar)
+ 			ieee80211_hw_set(ar->hw, USES_RSS);
+ 	}
+ 
++	ieee80211_hw_set(ar->hw, SUPPORTS_TID_CLASS_OFFLOAD);
++
+ 	/* If supported number of NSS is less than the maximum
+ 	 * NSS of device, then SUPPORTS_VHT_EXT_NSS_BW capablity
+ 	 * needs to adevertise to upper layer
+diff --git a/include/net/mac80211.h b/include/net/mac80211.h
+index 002354c..633e723 100644
+--- a/include/net/mac80211.h
++++ b/include/net/mac80211.h
+@@ -2502,6 +2502,8 @@ struct ieee80211_txq {
+  *
+  * @IEEE80211_HW_SUPPORTS_MULTI_BSSID_AP: Hardware supports multi BSSID in AP mode
+  *
++ * @IEEE80211_HW_SUPPORTS_TID_CLASS_OFFLOAD: Hardware suports tid calssification offload.
++ *
+  * @NUM_IEEE80211_HW_FLAGS: number of hardware flags, used for sizing arrays
+  */
+ enum ieee80211_hw_flags {
+@@ -2560,6 +2562,7 @@ enum ieee80211_hw_flags {
+ 	IEEE80211_HW_SUPPORTS_NSS_OFFLOAD,
+ 	IEEE80211_HW_SUPPORTS_MULTI_BSSID_AP,
+ 	IEEE80211_HW_SUPPORTS_MESH_NSS_OFFLOAD,
++	IEEE80211_HW_SUPPORTS_TID_CLASS_OFFLOAD,
+ 
+ 	/* keep last, obviously */
+ 	NUM_IEEE80211_HW_FLAGS
+diff --git a/net/mac80211/debugfs.c b/net/mac80211/debugfs.c
+index 87dd864..56ace66 100644
+--- a/net/mac80211/debugfs.c
++++ b/net/mac80211/debugfs.c
+@@ -447,6 +447,7 @@ static const char *hw_flag_names[] = {
+ 	FLAG(SUPPORTS_NSS_OFFLOAD),
+ 	FLAG(SUPPORTS_MULTI_BSSID_AP),
+ 	FLAG(SUPPORTS_MESH_NSS_OFFLOAD),
++	FLAG(SUPPORTS_TID_CLASS_OFFLOAD),
+ #undef FLAG
+ };
+ 
+diff --git a/net/mac80211/wme.c b/net/mac80211/wme.c
+index 9ea6004..c388bd8 100644
+--- a/net/mac80211/wme.c
++++ b/net/mac80211/wme.c
+@@ -186,6 +186,9 @@ u16 ieee80211_select_queue(struct ieee80211_sub_if_data *sdata,
+ 	const u8 *ra = NULL;
+ 	u16 ret;
+ 
++	if (ieee80211_hw_check(&local->hw, SUPPORTS_TID_CLASS_OFFLOAD))
++		return 0;
++
+ 	/* when using iTXQ, we can do this later */
+ 	if (local->ops->wake_tx_queue)
+ 		return 0;
+-- 
+2.7.4
+

@@ -1,0 +1,39 @@
+From d188879786d59420811ca8f3c3845388d8bd99b1 Mon Sep 17 00:00:00 2001
+From: Aditya Kumar Singh <quic_adisi@quicinc.com>
+Date: Wed, 2 Feb 2022 10:49:02 +0530
+Subject: [PATCH] mac80211: fix checksum issue in mesh fast xmit path
+
+For the software encrypted packets, checksum offloaded to hardware can
+not be relied upon.
+
+Fix handling checksum for such packets in software itself
+
+Signed-off-by: Aditya Kumar Singh <quic_adisi@quicinc.com>
+---
+ net/mac80211/tx.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/net/mac80211/tx.c b/net/mac80211/tx.c
+index b97684f..132cc62 100644
+--- a/net/mac80211/tx.c
++++ b/net/mac80211/tx.c
+@@ -3511,6 +3511,16 @@ static bool ieee80211_mesh_xmit_fast(struct ieee80211_sub_if_data *sdata,
+ 	if (!entry)
+ 		return false;
+ 
++	/* if frame is software encrypted, checksum offloaded to
++	 * hardware can not be handled. Handle it in software instead
++	 */
++	if (skb->ip_summed == CHECKSUM_PARTIAL) {
++		skb_set_transport_header(skb,
++					 skb_checksum_start_offset(skb));
++		if (skb_checksum_help(skb))
++			return false;
++	}
++
+ 	info = IEEE80211_SKB_CB(skb);
+ 	memset(info, 0, sizeof(*info));
+ 	info->band = entry->band;
+-- 
+2.17.1
+

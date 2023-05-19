@@ -1,0 +1,175 @@
+From 8f254b74881e0138c5e32214a0a0e8e17e715e3c Mon Sep 17 00:00:00 2001
+From: Hari Chandrakanthan <haric@codeaurora.org>
+Date: Wed, 8 Sep 2021 19:15:28 +0530
+Subject: [PATCH] ath11k : Add debugfs support for tx power
+
+Support to parse and store peer specific tx power from htt stats is added.
+The tx power is updated for each ppdu.
+
+cmd to read the tx power :
+root@OpenWrt:/# cat /sys/kernel/debug/ieee80211/phyX/netdev\:wlanX/stations/xx\:
+xx\:xx\:xx\:xx\:xx/htt_comm_stats
+
+sample log :
+root@OpenWrt:/# cat /sys/kernel/debug/ieee80211/phyX/netdev\:wlanX/stations/xx\:
+xx\:xx\:xx\:xx\:xx/htt_comm_stats
+tx_pwr[0] : 24
+tx_pwr[1] : 0
+tx_pwr[2] : 0
+tx_pwr[3] : 0
+tx_pwr[4] : 0
+tx_pwr[5] : 0
+tx_pwr[6] : 0
+tx_pwr[7] : 0
+
+Signed-off-by: Hari Chandrakanthan <haric@codeaurora.org>
+---
+ drivers/net/wireless/ath/ath11k/core.h        |  3 ++
+ drivers/net/wireless/ath/ath11k/debugfs_sta.c | 40 +++++++++++++++++++++++++++
+ drivers/net/wireless/ath/ath11k/dp.h          | 16 +++++++++++
+ drivers/net/wireless/ath/ath11k/dp_rx.c       | 15 ++++++++++
+ 4 files changed, 74 insertions(+)
+
+diff --git a/drivers/net/wireless/ath/ath11k/core.h b/drivers/net/wireless/ath/ath11k/core.h
+index 3c3d894..34074d5 100644
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -489,6 +489,9 @@ struct ath11k_sta {
+ 	u32 ps_total_duration;
+ 	struct ath11k_wbm_tx_stats *wbm_tx_stats;
+ 	u8 num_spatial_strm_mask;
++	u8 tx_pwr_multiplier;
++	u8 chain_enable_bits;
++	u32 tx_pwr[HTT_PPDU_STATS_USER_CMN_TX_PWR_ARR_SIZE];
+ #ifdef CPTCFG_ATH11K_CFR
+ 	struct ath11k_per_peer_cfr_capture cfr_capture;
+ #endif
+diff --git a/drivers/net/wireless/ath/ath11k/debugfs_sta.c b/drivers/net/wireless/ath/ath11k/debugfs_sta.c
+index d715ab9..3db4d60 100644
+--- a/drivers/net/wireless/ath/ath11k/debugfs_sta.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs_sta.c
+@@ -1549,6 +1549,45 @@ static const struct file_operations fops_peer_cfr_capture = {
+ };
+ #endif /* CPTCFG_ATH11K_CFR */
+ 
++#define GET_PER_CHAIN_TX_PWR_FRM_U32(arr, chain_idx) \
++				((arr[chain_idx/4] >> (chain_idx % 4) * 8) & 0xFF)
++
++static ssize_t ath11k_dbg_sta_read_htt_comm_stats(struct file *file,
++						  char __user *user_buf,
++						  size_t count, loff_t *ppos)
++{
++	struct ieee80211_sta *sta = file->private_data;
++	struct ath11k_sta *arsta = (struct ath11k_sta *)sta->drv_priv;
++	struct ath11k *ar = arsta->arvif->ar;
++	char buf[512] = {0};
++	int len = 0;
++	int i;
++	s8 tx_pwr;
++
++	mutex_lock(&ar->conf_mutex);
++	spin_lock_bh(&ar->ab->base_lock);
++	for(i = 0; i < (HTT_PPDU_STATS_USER_CMN_TX_PWR_ARR_SIZE * 4); i++) {
++		if(arsta->tx_pwr_multiplier && (arsta->chain_enable_bits & (1 << i))) {
++			tx_pwr = GET_PER_CHAIN_TX_PWR_FRM_U32(arsta->tx_pwr, i);
++			tx_pwr = tx_pwr/arsta->tx_pwr_multiplier;
++		} else
++			tx_pwr = 0;
++		len += scnprintf(buf + len, sizeof(buf) - len,
++				 "tx_pwr[%d] : %d\n", i, tx_pwr);
++	}
++	spin_unlock_bh(&ar->ab->base_lock);
++	mutex_unlock(&ar->conf_mutex);
++
++	return simple_read_from_buffer(user_buf, count, ppos, buf, len);
++}
++
++static const struct file_operations fops_htt_comm_stats = {
++	.read = ath11k_dbg_sta_read_htt_comm_stats,
++	.open = simple_open,
++	.owner = THIS_MODULE,
++	.llseek = default_llseek,
++};
++
+ void ath11k_debugfs_sta_op_add(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+ 			       struct ieee80211_sta *sta, struct dentry *dir)
+ {
+@@ -1607,4 +1646,5 @@ void ath11k_debugfs_sta_op_add(struct ieee80211_hw *hw, struct ieee80211_vif *vi
+ 		    ar->ab->wmi_ab.svc_map))
+ 		debugfs_create_file("config_nss", 0600, dir, sta,
+ 				    &fops_config_num_spatial_strm);
++	debugfs_create_file("htt_comm_stats", 0400, dir, sta, &fops_htt_comm_stats);
+ }
+diff --git a/drivers/net/wireless/ath/ath11k/dp.h b/drivers/net/wireless/ath/ath11k/dp.h
+index 49fee63..c096af5 100644
+--- a/drivers/net/wireless/ath/ath11k/dp.h
++++ b/drivers/net/wireless/ath/ath11k/dp.h
+@@ -1559,6 +1559,10 @@ struct htt_ppdu_stats_usr_cmpltn_ack_ba_status {
+ #define HTT_PPDU_STATS_USR_CMN_FLAG_DELAYBA	BIT(14)
+ #define HTT_PPDU_STATS_USR_CMN_HDR_SW_PEERID	GENMASK(31, 16)
+ #define HTT_PPDU_STATS_USR_CMN_CTL_FRM_CTRL	GENMASK(15, 0)
++#define HTT_STATS_MAX_CHAINS 8
++#define HTT_PPDU_STATS_USER_CMN_TLV_TX_PWR_CHAINS_PER_U32 4
++#define HTT_PPDU_STATS_USER_CMN_TX_PWR_ARR_SIZE HTT_STATS_MAX_CHAINS / \
++						HTT_PPDU_STATS_USER_CMN_TLV_TX_PWR_CHAINS_PER_U32
+ 
+ struct  htt_ppdu_stats_user_common {
+ 	u8 tid_num;
+@@ -1569,6 +1573,18 @@ struct  htt_ppdu_stats_user_common {
+ 	u32 buffer_paddr_31_0;
+ 	u32 buffer_paddr_39_32;
+ 	u32 host_opaque_cookie;
++	u32 qdepth_bytes;
++	u32 full_aid;
++	u32 data_frm_ppdu_id;
++	u32 sw_rts_prot_dur_us;
++	u8 tx_pwr_multiplier;
++	u8 chain_enable_bits;
++	u16 reserved;
++	/*
++	 *tx_pwr is applicable for each radio chain
++	 *tx_pwr for each radio chain is a 8 bit value
++	 */
++	u32 tx_pwr[HTT_PPDU_STATS_USER_CMN_TX_PWR_ARR_SIZE];
+ } __packed;
+ 
+ struct htt_ppdu_stats_usr_cmn_array {
+diff --git a/drivers/net/wireless/ath/ath11k/dp_rx.c b/drivers/net/wireless/ath/ath11k/dp_rx.c
+index 46c2c46..3c85b33 100644
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -1311,9 +1311,12 @@ static int ath11k_htt_tlv_ppdu_stats_parse(struct ath11k_base *ab,
+ {
+ 	struct htt_ppdu_stats_info *ppdu_info;
+ 	struct htt_ppdu_user_stats *user_stats = NULL;
++	struct ath11k_sta *arsta;
++	struct ath11k_peer *peer;
+ 	int cur_user;
+ 	u16 peer_id;
+ 	u32 frame_type;
++	int i;
+ 
+ 	ppdu_info = (struct htt_ppdu_stats_info *)data;
+ 
+@@ -1426,6 +1429,18 @@ static int ath11k_htt_tlv_ppdu_stats_parse(struct ath11k_base *ab,
+ 		user_stats->delay_ba = FIELD_GET(HTT_PPDU_STATS_USR_CMN_FLAG_DELAYBA,
+ 						  user_stats->common.info);
+ 		ppdu_info->delay_ba = user_stats->delay_ba;
++		rcu_read_lock();
++		spin_lock_bh(&ab->base_lock);
++		peer = ath11k_peer_find_by_id(ab, peer_id);
++		if(peer && peer->sta) {
++			arsta = (struct ath11k_sta *)peer->sta->drv_priv;
++			arsta->tx_pwr_multiplier = user_stats->common.tx_pwr_multiplier;
++			arsta->chain_enable_bits = user_stats->common.chain_enable_bits;
++			for(i = 0; i < HTT_PPDU_STATS_USER_CMN_TX_PWR_ARR_SIZE; i++)
++				arsta->tx_pwr[i] = user_stats->common.tx_pwr[i];
++		}
++		spin_unlock_bh(&ab->base_lock);
++		rcu_read_unlock();
+ 		break;
+ 	default:
+ 		break;
+-- 
+2.7.4
+

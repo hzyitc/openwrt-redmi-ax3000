@@ -1,0 +1,307 @@
+From 24f8df5c39e1e1a3cdcf1af80560da34438205aa Mon Sep 17 00:00:00 2001
+From: Hari Chandrakanthan <quic_haric@quicinc.com>
+Date: Fri, 4 Mar 2022 23:00:18 +0530
+Subject: [PATCH] ath11k: add tx delay to tsf
+
+An AP sending a beacon frame shall set the value of the beacon frame’s
+timestamp so that it equals the value of the STA’s TSF timer at the
+time that the data symbol containing the first bit of the timestamp
+is transmitted to the PHY plus the transmitting STA’s delays through
+its local PHY from the MAC-PHY interface to its interface with the WM.
+
+With this fix, tsf of beacon % beacon interval is greater than or equal
+to the minimum value provided in the spec.
+
+tx delay for 5G/6G:
+20(lsig)+2(service)+32(6mbps, 24 bytes) = 54us + 2us(MAC/BB DELAY)
+tx delay for 2.4G:
+144 us ( LPREAMBLE) + 48 (PLCP Header) + 192 (1Mbps, 24 ytes)
+= 384 us + 2us(MAC/BB DELAY
+
+Signed-off-by: Hari Chandrakanthan <quic_haric@quicinc.com>
+---
+ drivers/net/wireless/ath/ath11k/core.h |   1 +
+ drivers/net/wireless/ath/ath11k/mac.c  |  20 ++++-
+ drivers/net/wireless/ath/ath11k/mac.h  |   1 +
+ drivers/net/wireless/ath/ath11k/wmi.c  | 134 ++++++++++++++++++++++++++++++++-
+ drivers/net/wireless/ath/ath11k/wmi.h  |  18 +++++
+ 5 files changed, 172 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/wireless/ath/ath11k/core.h b/drivers/net/wireless/ath/ath11k/core.h
+index 8d7ab86..08403d9 100644
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -369,6 +369,7 @@ struct ath11k_vif {
+ 	u32 tid_conf_changed[ATH11K_TID_MAX];
+ 	struct ath11k_tid_qos_config tid_cfg[ATH11K_TID_MAX];
+ 	u32 tids_rst;
++	u64 tbtt_offset;
+ 	DECLARE_BITMAP(free_groupidx_map, ATH11K_GROUP_KEYS_NUM_MAX);
+ };
+ 
+diff --git a/drivers/net/wireless/ath/ath11k/mac.c b/drivers/net/wireless/ath/ath11k/mac.c
+index 6f473e1..d9404b8 100644
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -1230,6 +1230,7 @@ static int __ath11k_mac_setup_bcn_tmpl(struct ath11k_vif *arvif, struct sk_buff
+ 	u8 *ies;
+ 	int ret;
+ 	const u8 *vht_cap_ie;
++	u64 adjusted_tsf;
+ 
+ 	ies = bcn->data + ieee80211_get_hdrlen_from_skb(bcn);
+ 	ies += sizeof(mgmt->u.beacon);
+@@ -1267,6 +1268,15 @@ static int __ath11k_mac_setup_bcn_tmpl(struct ath11k_vif *arvif, struct sk_buff
+ 			     WMI_BEACON_EMA_PARAM_LAST_TMPL_SHIFT;
+ 	}
+ 
++	/* Make the TSF offset negative so beacons in the same
++	 * staggered batch have the same TSF.
++	 */
++	if (arvif->tbtt_offset) {
++		adjusted_tsf = cpu_to_le64(0ULL - arvif->tbtt_offset);
++		mgmt = (void *)bcn->data;
++		memcpy(&mgmt->u.beacon.timestamp, &adjusted_tsf, sizeof(adjusted_tsf));
++	}
++
+ 	ret = ath11k_wmi_bcn_tmpl(ar, arvif->vdev_id, &offs, bcn, ema_param);
+ 
+ 	if (ret)
+@@ -1365,7 +1375,7 @@ static int ath11k_mac_setup_bcn_tmpl_legacy(struct ath11k_vif *arvif,
+ 	return ret;
+ }
+ 
+-static int ath11k_mac_setup_bcn_tmpl(struct ath11k_vif *arvif)
++int ath11k_mac_setup_bcn_tmpl(struct ath11k_vif *arvif)
+ {
+ 	struct ath11k_vif *pvif = arvif;
+ 	struct ath11k_vif *cvif = NULL;
+@@ -6832,11 +6842,13 @@ static void ath11k_mac_op_tx(struct ieee80211_hw *hw,
+ 	u32 info_flags = info->flags;
+ 	struct ieee80211_sta *sta = control->sta;
+ 	struct ath11k_sta *arsta = NULL;
++	struct ieee80211_mgmt *mgmt;
+ 	bool is_prb_rsp;
+ 	u16 frm_type = 0;
+ 	u8 tid, *qos_ctl;
+ 	bool noack = false;
+ 	int ret;
++	u64 adjusted_tsf;
+ 
+ 	if (unlikely(test_bit(ATH11K_FLAG_CRASH_FLUSH, &ar->ab->dev_flags))) {
+ 		ieee80211_free_txskb(ar->hw, skb);
+@@ -6856,6 +6868,12 @@ static void ath11k_mac_op_tx(struct ieee80211_hw *hw,
+ 	} else if (ieee80211_is_mgmt(hdr->frame_control)) {
+ 		frm_type = FIELD_GET(IEEE80211_FCTL_STYPE, hdr->frame_control);
+ 		is_prb_rsp = ieee80211_is_probe_resp(hdr->frame_control);
++		if (is_prb_rsp && arvif->tbtt_offset) {
++			mgmt = (struct ieee80211_mgmt *)skb->data;
++			adjusted_tsf = cpu_to_le64(0ULL - arvif->tbtt_offset);
++			memcpy(&mgmt->u.probe_resp.timestamp, &adjusted_tsf,
++			       sizeof(adjusted_tsf));
++		}
+ 		ret = ath11k_mac_tx_over_wmi(ar, skb, is_prb_rsp);
+ 		if (ret) {
+ 			if (ret != -EBUSY)
+diff --git a/drivers/net/wireless/ath/ath11k/mac.h b/drivers/net/wireless/ath/ath11k/mac.h
+index 9decde2..475756a 100644
+--- a/drivers/net/wireless/ath/ath11k/mac.h
++++ b/drivers/net/wireless/ath/ath11k/mac.h
+@@ -176,4 +176,5 @@ bool ath11k_mac_sta_level_info(struct ath11k_vif *arvif, struct ieee80211_sta *s
+ void ath11k_mac_get_any_chandef_iter(struct ieee80211_hw *hw,
+ 				     struct ieee80211_chanctx_conf *conf,
+ 				     void *data);
++int ath11k_mac_setup_bcn_tmpl(struct ath11k_vif *arvif);
+ #endif
+diff --git a/drivers/net/wireless/ath/ath11k/wmi.c b/drivers/net/wireless/ath/ath11k/wmi.c
+index d87069e..3a176f9 100644
+--- a/drivers/net/wireless/ath/ath11k/wmi.c
++++ b/drivers/net/wireless/ath/ath11k/wmi.c
+@@ -10211,6 +10211,126 @@ static void ath11k_wmi_tlv_cfr_cpature_phase_fixed_param(const void *ptr,
+ 	}
+ }
+ 
++static int ath11k_wmi_tbtt_offset_subtlv_parser(struct ath11k_base *ab, u16 tag,
++						u16 len, const void *ptr,
++						void *data)
++{
++	int ret;
++	struct ath11k *ar;
++	u64 tx_delay = 0;
++	struct wmi_tbtt_offset_info *tbtt_offset_info;
++	struct ieee80211_chanctx_conf *conf;
++	struct ath11k_vif *arvif;
++
++	tbtt_offset_info = (struct wmi_tbtt_offset_info *)ptr;
++
++	rcu_read_lock();
++	ar = ath11k_mac_get_ar_by_vdev_id(ab, tbtt_offset_info->vdev_id);
++	if (!ar) {
++		ath11k_warn(ab, "ar not found, vdev_id %d\n", tbtt_offset_info->vdev_id);
++		ret = -EINVAL;
++		goto exit;
++	}
++
++	arvif = ath11k_mac_get_arvif(ar, tbtt_offset_info->vdev_id);
++	if (!arvif) {
++		ath11k_warn(ab, "arvif not found, vdev_id %d\n",
++			    tbtt_offset_info->vdev_id);
++		ret = -EINVAL;
++		goto exit;
++	}
++
++	if (!arvif->is_up || (arvif->vdev_type != WMI_VDEV_TYPE_AP)) {
++		ret = 0;
++		goto exit;
++	}
++
++	arvif->tbtt_offset = tbtt_offset_info->tbtt_offset;
++
++	conf = rcu_dereference(arvif->vif->chanctx_conf);
++	if (conf && conf->def.chan->band == NL80211_BAND_2GHZ) {
++		/* 1Mbps Beacon: */
++		/* 144 us ( LPREAMBLE) + 48 (PLCP Header)
++		 * + 192 (1Mbps, 24 ytes)
++		 * = 384 us + 2us(MAC/BB DELAY
++		 */
++		tx_delay = 386;
++	} else if (conf && (conf->def.chan->band == NL80211_BAND_5GHZ ||
++			    conf->def.chan->band == NL80211_BAND_6GHZ)) {
++		/* 6Mbps Beacon: */
++		/*20(lsig)+2(service)+32(6mbps, 24 bytes)
++		 *= 54us + 2us(MAC/BB DELAY)
++		 */
++		tx_delay = 56;
++	}
++	arvif->tbtt_offset -= tx_delay;
++
++	ret = ath11k_mac_setup_bcn_tmpl(arvif);
++
++	if (ret)
++		ath11k_warn(ab, "failed to submit beacon template: %d\n",
++			    ret);
++exit:
++	rcu_read_unlock();
++	return ret;
++}
++
++static int ath11k_wmi_tbtt_offset_event_parser(struct ath11k_base *ab,
++					       u16 tag, u16 len,
++					       const void *ptr, void *data)
++{
++	int ret;
++
++	ath11k_dbg(ab, ATH11K_DBG_WMI, "wmi tbtt offset event tag 0x%x of len %d rcvd\n",
++		   tag, len);
++
++	if (tag == WMI_TAG_ARRAY_STRUCT) {
++		ret = ath11k_wmi_tlv_iter(ab, ptr, len,
++					  ath11k_wmi_tbtt_offset_subtlv_parser,
++					  data);
++	}
++
++	return ret;
++}
++
++static int ath11k_wmi_pull_tbtt_offset(struct ath11k_base *ab, struct sk_buff *skb,
++				       struct wmi_tbtt_offset_ev_arg *arg)
++{
++	struct wmi_tbtt_offset_event *ev = NULL;
++	struct wmi_tbtt_offset_info tbtt_offset_info = {0};
++	struct wmi_tlv *tlv;
++	int ret;
++	u8 *ptr;
++	u16 tlv_tag;
++
++	ptr = skb->data;
++
++	if (skb->len < (sizeof(*ev) + TLV_HDR_SIZE)) {
++		ath11k_warn(ab, "wmi_tbtt_offset event size invalid\n");
++		return -EINVAL;
++	}
++
++	tlv = (struct wmi_tlv *)ptr;
++	tlv_tag = FIELD_GET(WMI_TLV_TAG, tlv->header);
++	ptr += sizeof(*tlv);
++
++	if (tlv_tag == WMI_TAG_TBTT_OFFSET_EXT_EVENT) {
++		ev = (struct wmi_tbtt_offset_event *)ptr;
++	} else {
++		ath11k_warn(ab, "tbtt event received with invalid tag\n");
++		return -EINVAL;
++	}
++
++	ret = ath11k_wmi_tlv_iter(ab, skb->data, skb->len,
++				  ath11k_wmi_tbtt_offset_event_parser,
++				  &tbtt_offset_info);
++	if (ret) {
++		ath11k_warn(ab, "failed to parse tbtt tlv %d\n", ret);
++		return -EINVAL;
++	}
++	return 0;
++}
++
+ static int ath11k_wmi_tlv_cfr_capture_evt_parse(struct ath11k_base *ab,
+ 						u16 tag, u16 len,
+ 						const void *ptr, void *data)
+@@ -10255,6 +10375,16 @@ static void ath11k_wmi_parse_cfr_capture_event(struct ath11k_base *ab,
+ 			   "failed to process cfr cpature ret = %d\n", ret);
+ }
+ 
++void ath11k_wmi_event_tbttoffset_update(struct ath11k_base *ab, struct sk_buff *skb)
++{
++	struct wmi_tbtt_offset_ev_arg arg = {};
++	int ret;
++
++	ret = ath11k_wmi_pull_tbtt_offset(ab, skb, &arg);
++	if (ret)
++		ath11k_warn(ab, "failed to parse tbtt offset event: %d\n", ret);
++}
++
+ static int ath11k_wmi_peer_ratecode_subtlv_parser(struct ath11k_base *ab,
+ 						  u16 tag, u16 len,
+ 						  const void *ptr, void *data)
+@@ -10526,8 +10656,10 @@ static void ath11k_wmi_tlv_op_rx(struct ath11k_base *ab, struct sk_buff *skb)
+ 	case WMI_OBSS_COLOR_COLLISION_DETECTION_EVENTID:
+ 		ath11k_wmi_obss_color_collision_event(ab, skb);
+ 		break;
+-	/* add Unsupported events here */
+ 	case WMI_TBTTOFFSET_EXT_UPDATE_EVENTID:
++		ath11k_wmi_event_tbttoffset_update(ab, skb);
++		break;
++	/* add Unsupported events here */
+ 	case WMI_PEER_OPER_MODE_CHANGE_EVENTID:
+ 	case WMI_TWT_ENABLE_EVENTID:
+ 	case WMI_TWT_DISABLE_EVENTID:
+diff --git a/drivers/net/wireless/ath/ath11k/wmi.h b/drivers/net/wireless/ath/ath11k/wmi.h
+index 95beb56..ecc42fc 100644
+--- a/drivers/net/wireless/ath/ath11k/wmi.h
++++ b/drivers/net/wireless/ath/ath11k/wmi.h
+@@ -4618,6 +4618,24 @@ struct wmi_vdev_delete_resp_event {
+ 	u32 vdev_id;
+ } __packed;
+ 
++struct wmi_tbtt_offset_info {
++	u32 vdev_id;
++	u32 tbtt_offset;
++	u32 tbtt_qtime_low_us;
++	u32 tbtt_qtime_high_us;
++} __packed;
++
++struct wmi_tbtt_offset_event {
++	u32 num_vdevs;
++} __packed;
++
++struct wmi_tbtt_offset_ev_arg {
++	u32 vdev_id;
++	u32 tbtt_offset;
++	u32 tbtt_qtime_low_us;
++	u32 tbtt_qtime_high_us;
++} __packed;
++
+ #define WMI_REG_CLIENT_MAX 4
+ 
+ struct wmi_reg_chan_list_cc_ext_event {
+-- 
+2.7.4
+

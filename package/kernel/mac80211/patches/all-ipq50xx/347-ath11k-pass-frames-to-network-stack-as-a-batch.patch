@@ -1,0 +1,91 @@
+From 4b94b0ed5b9885bd05e271709741653890c84d10 Mon Sep 17 00:00:00 2001
+From: Venkateswara Naralasetty <quic_vnaralas@quicinc.com>
+Date: Thu, 24 Feb 2022 16:50:39 +0530
+Subject: [PATCH] ath11k: pass frames to network stack as a batch
+
+Pass frames to network stack as a batch in case of nativeWiFi
+Rx path.
+
+Signed-off-by: Venkateswara Naralasetty <quic_vnaralas@quicinc.com>
+---
+ drivers/net/wireless/ath/ath11k/dp_rx.c | 20 ++++++++++++++------
+ 1 file changed, 14 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/net/wireless/ath/ath11k/dp_rx.c b/drivers/net/wireless/ath/ath11k/dp_rx.c
+index 99730ab..5946c5d 100644
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -3020,7 +3020,8 @@ static void ath11k_dp_rx_h_ppdu(struct ath11k *ar, struct hal_rx_desc *rx_desc,
+ 
+ static void ath11k_dp_rx_deliver_msdu(struct ath11k *ar, struct napi_struct *napi,
+ 				      struct sk_buff *msdu,
+-				      struct ieee80211_rx_status *status)
++				      struct ieee80211_rx_status *status,
++				      struct sk_buff_head *list)
+ {
+ 	static const struct ieee80211_radiotap_he known = {
+ 		.data1 = cpu_to_le16(IEEE80211_RADIOTAP_HE_DATA1_DATA_MCS_KNOWN |
+@@ -3092,7 +3093,10 @@ static void ath11k_dp_rx_deliver_msdu(struct ath11k *ar, struct napi_struct *nap
+ 	    !(is_mcbc && rx_status->flag & RX_FLAG_DECRYPTED))
+ 		rx_status->flag |= RX_FLAG_8023;
+ 
+-	ieee80211_rx_napi(ar->hw, pubsta, msdu, napi);
++	if (list)
++		ieee80211_rx_list(ar->hw, pubsta, msdu, list);
++	else
++		ieee80211_rx_napi(ar->hw, pubsta, msdu, napi);
+ 
+ 	if (ath11k_debugfs_is_extd_rx_stats_enabled(ar)) {
+ 		if (!(status->flag & RX_FLAG_ONLY_MONITOR)) {
+@@ -3215,6 +3219,7 @@ static void ath11k_dp_rx_process_received_packets(struct ath11k_base *ab,
+ 	struct ieee80211_rx_status rx_status = {0};
+ 	int ret;
+ 	bool fast_rx;
++	LIST_HEAD(rx_list);
+ 
+ 	if (skb_queue_empty(msdu_list))
+ 		return;
+@@ -3251,9 +3256,12 @@ static void ath11k_dp_rx_process_received_packets(struct ath11k_base *ab,
+ 
+ 		/* msdu is already delivered directectly */
+ 		if (!fast_rx)
+-			ath11k_dp_rx_deliver_msdu(ar, napi, msdu, &rx_status);
++			ath11k_dp_rx_deliver_msdu(ar, napi, msdu, &rx_status, &rx_list);
+ 	}
+ 
++	if (!fast_rx)
++		netif_receive_skb_list(&rx_list);
++
+ 	rcu_read_unlock();
+ }
+ 
+@@ -3271,7 +3279,7 @@ void ath11k_dp_rx_from_nss(struct ath11k *ar, struct sk_buff *msdu,
+ 
+ 	rx_status.flag |= RX_FLAG_SKIP_MONITOR | RX_FLAG_DUP_VALIDATED;
+ 
+-	ath11k_dp_rx_deliver_msdu(ar, napi, msdu, &rx_status);
++	ath11k_dp_rx_deliver_msdu(ar, napi, msdu, &rx_status, NULL);
+ }
+ 
+ int ath11k_dp_process_rx(struct ath11k_base *ab, int ring_id,
+@@ -5145,7 +5153,7 @@ static void ath11k_dp_rx_wbm_err(struct ath11k *ar,
+ 		return;
+ 	}
+ 
+-	ath11k_dp_rx_deliver_msdu(ar, napi, msdu, &rxs);
++	ath11k_dp_rx_deliver_msdu(ar, napi, msdu, &rxs, NULL);
+ }
+ 
+ int ath11k_dp_rx_process_wbm_err(struct ath11k_base *ab,
+@@ -6256,7 +6264,7 @@ static int ath11k_dp_rx_mon_deliver(struct ath11k *ar, u32 mac_id,
+ 		}
+ 		rxs->flag |= RX_FLAG_ONLY_MONITOR;
+ 		ath11k_update_radiotap(ar, ppduinfo, mon_skb, rxs);
+-		ath11k_dp_rx_deliver_msdu(ar, napi, mon_skb, rxs);
++		ath11k_dp_rx_deliver_msdu(ar, napi, mon_skb, rxs, NULL);
+ 		mon_skb = skb_next;
+ 	} while (mon_skb);
+ 	rxs->flag = 0;
+-- 
+2.7.4
+

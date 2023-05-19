@@ -1,0 +1,59 @@
+From 9d27879a3f77a49328ca721da1f015e2242206ef Mon Sep 17 00:00:00 2001
+From: Wen Gong <quic_wgong@quicinc.com>
+Date: Wed, 20 Oct 2021 15:30:28 +0530
+Subject: [PATCH] ath11k: discard BSS_CHANGED_TXPOWER when EXT_TPC_REG_SUPPORT
+ for 6G
+
+When STATION is connected to a 6 GHz AP, or when AP boots up, it has
+2 way to configure the power limit to firmware. The first way is to
+send 2 wmi command WMI_PDEV_PARAM_TXPOWER_LIMIT2G/
+WMI_PDEV_PARAM_TXPOWER_LIMIT5G to firmware, the second way is to send
+WMI_VDEV_SET_TPC_POWER_CMDID to firmware which include more parameters
+for power control.
+
+When firmware support SERVICE_EXT_TPC_REG, it means firmware support
+the second way for WMI_VDEV_SET_TPC_POWER_CMDID, then ath11k discard
+BSS_CHANGED_TXPOWER flag from mac80211 which is used to the first way
+for 6G band in this patch and select the second way in the subsequent
+patch.
+
+Signed-off-by: Wen Gong <quic_wgong@quicinc.com>
+Signed-off-by: Aditya Kumar Singh <quic_adisi@quicinc.com>
+---
+ drivers/net/wireless/ath/ath11k/mac.c | 13 +++++++++++--
+ drivers/net/wireless/ath/ath11k/wmi.h |  1 +
+ 2 files changed, 12 insertions(+), 2 deletions(-)
+
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -3503,8 +3503,18 @@ static void ath11k_mac_op_bss_info_chang
+ 		ath11k_dbg(ar->ab, ATH11K_DBG_MAC, "mac vdev_id %i txpower %d\n",
+ 			   arvif->vdev_id, info->txpower);
+ 
+-		arvif->txpower = info->txpower;
+-		ath11k_mac_txpower_recalc(ar);
++		if (ar->supports_6ghz && info->chandef.chan &&
++		    info->chandef.chan->band == NL80211_BAND_6GHZ &&
++		    (arvif->vdev_type == WMI_VDEV_TYPE_STA ||
++		     arvif->vdev_type == WMI_VDEV_TYPE_AP) &&
++		    test_bit(WMI_TLV_SERVICE_EXT_TPC_REG_SUPPORT,
++			     ar->ab->wmi_ab.svc_map)) {
++			ath11k_dbg(ar->ab, ATH11K_DBG_MAC,
++				   "discard tx power, change to set TPC power\n");
++		} else {
++			arvif->txpower = info->txpower;
++			ath11k_mac_txpower_recalc(ar);
++		}
+ 	}
+ 
+ 	if (changed & BSS_CHANGED_MCAST_RATE &&
+--- a/drivers/net/wireless/ath/ath11k/wmi.h
++++ b/drivers/net/wireless/ath/ath11k/wmi.h
+@@ -2186,6 +2186,7 @@ enum wmi_tlv_service {
+ 	WMI_TLV_SERVICE_FSE_CMEM_ALLOC_SUPPORT = 262,
+ 	WMI_TLV_SERVICE_PASSIVE_SCAN_START_TIME_ENHANCE = 263,
+ 	WMI_TLV_SERVICE_QOS_NULL_FRAME_TX_OVER_WMI = 264,
++	WMI_TLV_SERVICE_EXT_TPC_REG_SUPPORT = 280,
+ 	WMI_TLV_SERVICE_REG_CC_EXT_EVENT_SUPPORT = 281,
+ 	WMI_TLV_SERVICE_DCS_AWGN_INT_SUPPORT = 286,
+ 	WMI_TLV_SERVICE_DYN_NSS_MASK_SUPPORT = 303,

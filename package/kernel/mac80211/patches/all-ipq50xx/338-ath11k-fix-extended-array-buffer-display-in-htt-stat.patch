@@ -1,0 +1,153 @@
+From 91b6deeb1944e4b0bd297ea5a6e40ba81657935c Mon Sep 17 00:00:00 2001
+From: Aditya Kumar Singh <quic_adisi@quicinc.com>
+Date: Thu, 16 Dec 2021 11:19:57 +0530
+Subject: [PATCH] ath11k: fix extended array buffer display in htt stats
+
+ARRAY_TO_BUF macro loops from index 0 to len and prints the same
+index to the buffer. However, for extended parameters like Tx
+MCS Extended variable, there is  requirement to loop from 0 to len
+but print (index + MAX ARRAY LENGTH OF NON EXTENDED PARAMETER) to
+the buffer. This was leading to index to roll over from start for
+extended variable case. Hence, this macro can not be used.
+
+Current Output:
+tx_mcs = 0:0, 1:0, 2:0, 3:0, 4:0, 5:0, 6:26, 7:20, 8:21, 9:22, 10:196, 11:613, 0:0, 1:0,
+
+Expected Output:
+tx_mcs = 0:0, 1:0, 2:0, 3:0, 4:0, 5:0, 6:26, 7:20, 8:21, 9:22, 10:196, 11:613, 12:0, 13:0,
+
+Add ARRAY_TO_BUF_EXT macro to print the extended variable array to
+the buffer.
+
+Signed-off-by: Aditya Kumar Singh <quic_adisi@quicinc.com>
+---
+ .../net/wireless/ath/ath11k/debugfs_htt_stats.c    | 56 +++++++++++++++-------
+ 1 file changed, 38 insertions(+), 18 deletions(-)
+
+diff --git a/drivers/net/wireless/ath/ath11k/debugfs_htt_stats.c b/drivers/net/wireless/ath/ath11k/debugfs_htt_stats.c
+index 3b50755..19c03e0 100644
+--- a/drivers/net/wireless/ath/ath11k/debugfs_htt_stats.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs_htt_stats.c
+@@ -28,6 +28,17 @@
+                 buflen += index;                                               \
+         } while (0)
+ 
++#define ARRAY_TO_BUF_EXT(out, buflen, arr, len, ext_len)                       \
++	do {                                                                   \
++		int index = 0; u8 i;                                           \
++		for (i = 0; i < len; i++) {                                    \
++			index += scnprintf((out + buflen) + index,             \
++				(ATH11K_HTT_STATS_BUF_SIZE - buflen) - index,  \
++					  " %u:%u,", i + ext_len, arr[i]);     \
++		}                                                              \
++		buflen += index;                                               \
++	} while (0)
++
+ #define CHAIN_ARRAY_TO_BUF(out, buflen, arr, len)			       	       \
+ 	do {								       \
+ 		int index = 0; u8 i;					       \
+@@ -3123,29 +3134,33 @@ static inline void htt_print_tx_pdev_rate_stats_tlv(const void *tag_buf,
+ 	ARRAY_TO_BUF(buf, len, htt_stats_buf->tx_mcs,
+ 		     HTT_TX_PDEV_STATS_NUM_MCS_COUNTERS);
+ 	len += HTT_DBG_OUT(buf + len, buf_len - len, " ");
+-	ARRAY_TO_BUF(buf, len, htt_stats_buf->tx_mcs_ext,
+-		     HTT_TX_PDEV_STATS_NUM_EXTRA_MCS_COUNTERS);
++	ARRAY_TO_BUF_EXT(buf, len, htt_stats_buf->tx_mcs_ext,
++		     HTT_TX_PDEV_STATS_NUM_EXTRA_MCS_COUNTERS,
++		     HTT_TX_PDEV_STATS_NUM_MCS_COUNTERS);
+ 
+ 	len += HTT_DBG_OUT(buf + len, buf_len - len, "\nac_mu_mimo_tx_mcs = ");
+ 	ARRAY_TO_BUF(buf, len, htt_stats_buf->ac_mu_mimo_tx_mcs,
+ 		     HTT_TX_PDEV_STATS_NUM_MCS_COUNTERS);
+ 	len += HTT_DBG_OUT(buf + len, buf_len - len, " ");
+-	ARRAY_TO_BUF(buf, len, htt_stats_buf->ax_mu_mimo_tx_mcs_ext,
+-		     HTT_TX_PDEV_STATS_NUM_EXTRA_MCS_COUNTERS);
++	ARRAY_TO_BUF_EXT(buf, len, htt_stats_buf->ax_mu_mimo_tx_mcs_ext,
++		     HTT_TX_PDEV_STATS_NUM_EXTRA_MCS_COUNTERS,
++		     HTT_TX_PDEV_STATS_NUM_MCS_COUNTERS);
+ 
+ 	len += HTT_DBG_OUT(buf + len, buf_len - len, "\nax_mu_mimo_tx_mcs = ");
+ 	ARRAY_TO_BUF(buf, len, htt_stats_buf->ax_mu_mimo_tx_mcs,
+ 		     HTT_TX_PDEV_STATS_NUM_MCS_COUNTERS);
+ 	len += HTT_DBG_OUT(buf + len, buf_len - len, " ");
+-	ARRAY_TO_BUF(buf, len, htt_stats_buf->ax_mu_mimo_tx_mcs_ext,
+-		     HTT_TX_PDEV_STATS_NUM_EXTRA_MCS_COUNTERS);
++	ARRAY_TO_BUF_EXT(buf, len, htt_stats_buf->ax_mu_mimo_tx_mcs_ext,
++		     HTT_TX_PDEV_STATS_NUM_EXTRA_MCS_COUNTERS,
++		     HTT_TX_PDEV_STATS_NUM_MCS_COUNTERS);
+ 
+ 	len += HTT_DBG_OUT(buf + len, buf_len - len, "\nofdma_tx_mcs = ");
+ 	ARRAY_TO_BUF(buf, len, htt_stats_buf->ofdma_tx_mcs,
+ 		     HTT_TX_PDEV_STATS_NUM_MCS_COUNTERS);
+ 	len += HTT_DBG_OUT(buf + len, buf_len - len, " ");
+-	ARRAY_TO_BUF(buf, len, htt_stats_buf->ofdma_tx_mcs_ext,
+-		     HTT_TX_PDEV_STATS_NUM_EXTRA_MCS_COUNTERS);
++	ARRAY_TO_BUF_EXT(buf, len, htt_stats_buf->ofdma_tx_mcs_ext,
++		     HTT_TX_PDEV_STATS_NUM_EXTRA_MCS_COUNTERS,
++		     HTT_TX_PDEV_STATS_NUM_MCS_COUNTERS);
+ 
+ 	len += HTT_DBG_OUT(buf + len, buf_len - len, "\ntx_nss = ");
+ 	ARRAY_TO_BUF(buf, len, htt_stats_buf->tx_nss,
+@@ -3183,8 +3198,9 @@ static inline void htt_print_tx_pdev_rate_stats_tlv(const void *tag_buf,
+ 	ARRAY_TO_BUF(buf, len, htt_stats_buf->tx_stbc,
+ 		     HTT_TX_PDEV_STATS_NUM_MCS_COUNTERS);
+ 	len += HTT_DBG_OUT(buf + len, buf_len - len, " ");
+-	ARRAY_TO_BUF(buf, len, htt_stats_buf->tx_stbc_ext,
+-		     HTT_TX_PDEV_STATS_NUM_EXTRA_MCS_COUNTERS);
++	ARRAY_TO_BUF_EXT(buf, len, htt_stats_buf->tx_stbc_ext,
++		     HTT_TX_PDEV_STATS_NUM_EXTRA_MCS_COUNTERS,
++		     HTT_TX_PDEV_STATS_NUM_MCS_COUNTERS);
+ 
+ 	len += HTT_DBG_OUT(buf + len, buf_len - len, "\ntx_pream = ");
+ 	ARRAY_TO_BUF(buf, len, htt_stats_buf->tx_pream,
+@@ -3204,8 +3220,9 @@ static inline void htt_print_tx_pdev_rate_stats_tlv(const void *tag_buf,
+ 		ARRAY_TO_BUF(buf, len, htt_stats_buf->tx_gi[j],
+ 			     HTT_TX_PDEV_STATS_NUM_MCS_COUNTERS);
+ 		len += HTT_DBG_OUT(buf + len, buf_len - len, " ");
+-		ARRAY_TO_BUF(buf, len, htt_stats_buf->tx_gi_ext[j],
+-			     HTT_TX_PDEV_STATS_NUM_EXTRA_MCS_COUNTERS);
++		ARRAY_TO_BUF_EXT(buf, len, htt_stats_buf->tx_gi_ext[j],
++			     HTT_TX_PDEV_STATS_NUM_EXTRA_MCS_COUNTERS,
++			     HTT_TX_PDEV_STATS_NUM_MCS_COUNTERS);
+ 	}
+ 
+ 	/* AC MU-MIMO GI Stats */
+@@ -3223,8 +3240,9 @@ static inline void htt_print_tx_pdev_rate_stats_tlv(const void *tag_buf,
+ 		ARRAY_TO_BUF(buf, len, htt_stats_buf->ax_mu_mimo_tx_gi[j],
+ 		 	     HTT_TX_PDEV_STATS_NUM_MCS_COUNTERS);
+ 		len += HTT_DBG_OUT(buf + len, buf_len - len, " ");
+-		ARRAY_TO_BUF(buf, len, htt_stats_buf->ax_mu_mimo_tx_gi_ext[j],
+-			     HTT_TX_PDEV_STATS_NUM_EXTRA_MCS_COUNTERS);
++		ARRAY_TO_BUF_EXT(buf, len, htt_stats_buf->ax_mu_mimo_tx_gi_ext[j],
++			     HTT_TX_PDEV_STATS_NUM_EXTRA_MCS_COUNTERS,
++			     HTT_TX_PDEV_STATS_NUM_MCS_COUNTERS);
+ 	}
+ 
+ 	/* DL OFDMA GI Stats */
+@@ -3233,8 +3251,9 @@ static inline void htt_print_tx_pdev_rate_stats_tlv(const void *tag_buf,
+ 		ARRAY_TO_BUF(buf, len, htt_stats_buf->ofdma_tx_gi[j],
+ 			     HTT_TX_PDEV_STATS_NUM_MCS_COUNTERS);
+ 		len += HTT_DBG_OUT(buf + len, buf_len - len, " ");
+-		ARRAY_TO_BUF(buf, len, htt_stats_buf->ofdma_tx_gi_ext[j],
+-			     HTT_TX_PDEV_STATS_NUM_EXTRA_MCS_COUNTERS);
++		ARRAY_TO_BUF_EXT(buf, len, htt_stats_buf->ofdma_tx_gi_ext[j],
++			     HTT_TX_PDEV_STATS_NUM_EXTRA_MCS_COUNTERS,
++			     HTT_TX_PDEV_STATS_NUM_MCS_COUNTERS);
+ 	}
+ 
+ 	len += HTT_DBG_OUT(buf + len, buf_len - len, "\ntx_dcm = ");
+@@ -4218,8 +4237,9 @@ static inline void htt_print_ul_mumimo_trig_stats(const u32 *tag_buf,
+ 		ARRAY_TO_BUF(buf, len, htt_ul_mumimo_trig_stats_buf->ul_mumimo_rx_gi[j],
+ 			     HTT_RX_PDEV_STATS_NUM_MCS_COUNTERS);
+ 		len += HTT_DBG_OUT(buf + len, buf_len - len, ", ");
+-		ARRAY_TO_BUF(buf, len, htt_ul_mumimo_trig_stats_buf->ul_mumimo_rx_gi_ext[j],
+-			     HTT_RX_PDEV_STATS_NUM_EXTRA_MCS_COUNTERS);
++		ARRAY_TO_BUF_EXT(buf, len, htt_ul_mumimo_trig_stats_buf->ul_mumimo_rx_gi_ext[j],
++			     HTT_RX_PDEV_STATS_NUM_EXTRA_MCS_COUNTERS,
++			     HTT_RX_PDEV_STATS_NUM_MCS_COUNTERS);
+ 	}
+ 
+ 	len += HTT_DBG_OUT(buf + len, buf_len - len, "\nul_mumimo_rx_nss = ");
+-- 
+2.7.4
+

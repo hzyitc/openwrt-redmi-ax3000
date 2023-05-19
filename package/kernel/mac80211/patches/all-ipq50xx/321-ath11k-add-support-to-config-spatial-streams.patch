@@ -1,0 +1,142 @@
+From 497c82f468955877b971776d21691f64ad976356 Mon Sep 17 00:00:00 2001
+From: Hari Chandrakanthan <haric@codeaurora.org>
+Date: Wed, 4 Aug 2021 12:45:54 +0530
+Subject: [PATCH] ath11k : add support to config spatial streams
+
+Support to enable and disable spatial stream is added.
+Currently upto 2 spatial streams are supported.
+
+0: Use autorate
+1: Enable only 1SS
+2: Enable only 2SS
+3: Enable 1SS, 2SS
+
+Cmd to read the nss(number of spatial stream) mask :
+cat /sys/kernel/debug/ieee80211/phyX/netdev\:wlanX/stations/xx\:
+xx\:xx\:xx\:xx\:xx/config_nss
+
+Cmd to write the nss mask :
+echo N > /sys/kernel/debug/ieee80211/phyX/netdev\:wlanX/stations
+/xx\:x\:xx\:xx\:xx\:xx/config_nss
+
+Signed-off-by: Hari Chandrakanthan <haric@codeaurora.org>
+---
+ drivers/net/wireless/ath/ath11k/core.h        |  1 +
+ drivers/net/wireless/ath/ath11k/debugfs_sta.c | 63 +++++++++++++++++++++++++++
+ drivers/net/wireless/ath/ath11k/wmi.h         |  2 +
+ 3 files changed, 66 insertions(+)
+
+diff --git a/drivers/net/wireless/ath/ath11k/core.h b/drivers/net/wireless/ath/ath11k/core.h
+index 59975ce..b0eccad 100644
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -481,6 +481,7 @@ struct ath11k_sta {
+ 	u8 peer_current_ps_valid;
+ 	u32 ps_total_duration;
+ 	struct ath11k_wbm_tx_stats *wbm_tx_stats;
++	u8 num_spatial_strm_mask;
+ #ifdef CPTCFG_ATH11K_CFR
+ 	struct ath11k_per_peer_cfr_capture cfr_capture;
+ #endif
+diff --git a/drivers/net/wireless/ath/ath11k/debugfs_sta.c b/drivers/net/wireless/ath/ath11k/debugfs_sta.c
+index 34f7227..d715ab9 100644
+--- a/drivers/net/wireless/ath/ath11k/debugfs_sta.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs_sta.c
+@@ -1144,6 +1144,65 @@ static const struct file_operations fops_peer_ps_state = {
+ 	.llseek = default_llseek,
+ };
+ 
++static ssize_t ath11k_num_spatial_strm_read(struct file *file,
++					    char __user *user_buf,
++					    size_t count, loff_t *ppos)
++{
++	struct ieee80211_sta *sta = file->private_data;
++	struct ath11k_sta *arsta = (struct ath11k_sta *)sta->drv_priv;
++	struct ath11k *ar = arsta->arvif->ar;
++	char buf[20];
++	int len = 0;
++
++	mutex_lock(&ar->conf_mutex);
++	len = scnprintf(buf, sizeof(buf) - len, "%d\n",
++			arsta->num_spatial_strm_mask);
++	mutex_unlock(&ar->conf_mutex);
++
++	return simple_read_from_buffer(user_buf, count, ppos, buf, len);
++}
++
++static ssize_t ath11k_num_spatial_strm_write(struct file *file,
++					     const char __user *buf,
++					     size_t count, loff_t *ppos)
++{
++	struct ieee80211_sta *sta = file->private_data;
++	struct ath11k_sta *arsta = (struct ath11k_sta *)sta->drv_priv;
++	struct ath11k *ar = arsta->arvif->ar;
++	int ret;
++	u8 num_spatial_strm_mask;
++
++	ret = kstrtou8_from_user(buf, count, 0, &num_spatial_strm_mask);
++	if (ret || num_spatial_strm_mask > GENMASK(sta->rx_nss - 1, 0))
++		return -EINVAL;
++
++	mutex_lock(&ar->conf_mutex);
++	if(arsta->num_spatial_strm_mask == num_spatial_strm_mask) {
++		ret = count;
++		goto out;
++	}
++	ret = ath11k_wmi_set_peer_param(ar, sta->addr, arsta->arvif->vdev_id,
++					WMI_PEER_PARAM_DYN_NSS_EN_MASK, num_spatial_strm_mask);
++	if(ret) {
++		ath11k_warn(ar->ab, "failed to send nss mask STA %pM vdev_id : %d nss_mask : %d",
++			    sta->addr, arsta->arvif->vdev_id, num_spatial_strm_mask);
++		goto out;
++	}
++	arsta->num_spatial_strm_mask = num_spatial_strm_mask;
++	ret = count;
++out:
++	mutex_unlock(&ar->conf_mutex);
++	return ret;
++}
++
++static const struct file_operations fops_config_num_spatial_strm = {
++	.open = simple_open,
++	.read = ath11k_num_spatial_strm_read,
++	.write = ath11k_num_spatial_strm_write,
++	.owner = THIS_MODULE,
++	.llseek = default_llseek,
++};
++
+ static ssize_t ath11k_dbg_sta_read_current_ps_duration(struct file *file,
+ 						       char __user *user_buf,
+ 						       size_t count,
+@@ -1544,4 +1603,8 @@ void ath11k_debugfs_sta_op_add(struct ieee80211_hw *hw, struct ieee80211_vif *vi
+ 				    &fops_peer_cfr_capture);
+ #endif/* CPTCFG_ATH11K_CFR */
+ 
++	if(test_bit(WMI_TLV_SERVICE_DYN_NSS_MASK_SUPPORT,
++		    ar->ab->wmi_ab.svc_map))
++		debugfs_create_file("config_nss", 0600, dir, sta,
++				    &fops_config_num_spatial_strm);
+ }
+diff --git a/drivers/net/wireless/ath/ath11k/wmi.h b/drivers/net/wireless/ath/ath11k/wmi.h
+index a04007b..476e7b9 100644
+--- a/drivers/net/wireless/ath/ath11k/wmi.h
++++ b/drivers/net/wireless/ath/ath11k/wmi.h
+@@ -2183,6 +2183,7 @@ enum wmi_tlv_service {
+ 	WMI_TLV_SERVICE_QOS_NULL_FRAME_TX_OVER_WMI = 264,
+ 	WMI_TLV_SERVICE_REG_CC_EXT_EVENT_SUPPORT = 281,
+ 	WMI_TLV_SERVICE_DCS_AWGN_INT_SUPPORT = 286,
++	WMI_TLV_SERVICE_DYN_NSS_MASK_SUPPORT = 303,
+ 
+ 	WMI_MAX_EXT2_SERVICE
+ };
+@@ -2222,6 +2223,7 @@ enum {
+ #define WMI_PEER_SET_MAX_TX_RATE                        0x11
+ #define WMI_PEER_SET_MIN_TX_RATE                        0x12
+ #define WMI_PEER_SET_DEFAULT_ROUTING                    0x13
++#define WMI_PEER_PARAM_DYN_NSS_EN_MASK                  0x24
+ 
+ /* slot time long */
+ #define WMI_VDEV_SLOT_TIME_LONG         0x1
+-- 
+2.7.4
+

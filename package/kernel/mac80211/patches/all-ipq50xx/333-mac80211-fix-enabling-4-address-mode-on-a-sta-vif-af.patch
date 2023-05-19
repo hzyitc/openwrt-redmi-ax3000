@@ -1,0 +1,88 @@
+From a5d3cbdb09ff1f52cbe040932e06c8b9915c6dad Mon Sep 17 00:00:00 2001
+From: Felix Fietkau <nbd@nbd.name>
+Date: Fri, 2 Jul 2021 07:01:11 +0200
+Subject: [PATCH] mac80211: fix enabling 4-address mode on a sta vif after
+ assoc
+
+Notify the driver about the 4-address mode change and also send a nulldata
+packet to the AP to notify it about the change
+
+Fixes: 1ff4e8f2dec8 ("mac80211: notify the driver when a sta uses 4-address mode")
+Signed-off-by: Felix Fietkau <nbd@nbd.name>
+Link: https://lore.kernel.org/r/20210702050111.47546-1-nbd@nbd.name
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ net/mac80211/cfg.c         | 19 +++++++++++++++++++
+ net/mac80211/ieee80211_i.h |  2 ++
+ net/mac80211/mlme.c        |  4 ++--
+ 3 files changed, 23 insertions(+), 2 deletions(-)
+
+diff --git a/net/mac80211/cfg.c b/net/mac80211/cfg.c
+index 84cc773..4e6f11e 100644
+--- a/net/mac80211/cfg.c
++++ b/net/mac80211/cfg.c
+@@ -152,6 +152,8 @@ static int ieee80211_change_iface(struct wiphy *wiphy,
+ 				  struct vif_params *params)
+ {
+ 	struct ieee80211_sub_if_data *sdata = IEEE80211_DEV_TO_SUB_IF(dev);
++	struct ieee80211_local *local = sdata->local;
++	struct sta_info *sta;
+ 	int ret;
+ 
+ 	ret = ieee80211_if_change_type(sdata, type);
+@@ -162,7 +164,24 @@ static int ieee80211_change_iface(struct wiphy *wiphy,
+ 		RCU_INIT_POINTER(sdata->u.vlan.sta, NULL);
+ 		ieee80211_check_fast_rx_iface(sdata);
+ 	} else if (type == NL80211_IFTYPE_STATION && params->use_4addr >= 0) {
++		struct ieee80211_if_managed *ifmgd = &sdata->u.mgd;
++
++		if (params->use_4addr == ifmgd->use_4addr)
++			return 0;
++
+ 		sdata->u.mgd.use_4addr = params->use_4addr;
++		if (!ifmgd->associated)
++			return 0;
++
++		mutex_lock(&local->sta_mtx);
++		sta = sta_info_get(sdata, ifmgd->bssid);
++		if (sta)
++			drv_sta_set_4addr(local, sdata, &sta->sta,
++					  params->use_4addr);
++		mutex_unlock(&local->sta_mtx);
++
++		if (params->use_4addr)
++			ieee80211_send_4addr_nullfunc(local, sdata);
+ 	}
+ 
+ 	if (sdata->vif.type == NL80211_IFTYPE_MONITOR) {
+diff --git a/net/mac80211/ieee80211_i.h b/net/mac80211/ieee80211_i.h
+index 22549b9..30ce6d2 100644
+--- a/net/mac80211/ieee80211_i.h
++++ b/net/mac80211/ieee80211_i.h
+@@ -2201,6 +2201,8 @@ void ieee80211_dynamic_ps_timer(struct timer_list *t);
+ void ieee80211_send_nullfunc(struct ieee80211_local *local,
+ 			     struct ieee80211_sub_if_data *sdata,
+ 			     bool powersave);
++void ieee80211_send_4addr_nullfunc(struct ieee80211_local *local,
++				   struct ieee80211_sub_if_data *sdata);
+ void ieee80211_sta_tx_notify(struct ieee80211_sub_if_data *sdata,
+ 			     struct ieee80211_hdr *hdr, bool ack, u16 tx_time);
+ 
+diff --git a/net/mac80211/mlme.c b/net/mac80211/mlme.c
+index a00f11a..c0ea3b1 100644
+--- a/net/mac80211/mlme.c
++++ b/net/mac80211/mlme.c
+@@ -1095,8 +1095,8 @@ void ieee80211_send_nullfunc(struct ieee80211_local *local,
+ 	ieee80211_tx_skb(sdata, skb);
+ }
+ 
+-static void ieee80211_send_4addr_nullfunc(struct ieee80211_local *local,
+-					  struct ieee80211_sub_if_data *sdata)
++void ieee80211_send_4addr_nullfunc(struct ieee80211_local *local,
++				   struct ieee80211_sub_if_data *sdata)
+ {
+ 	struct sk_buff *skb;
+ 	struct ieee80211_hdr *nullfunc;
+-- 
+2.7.4
+

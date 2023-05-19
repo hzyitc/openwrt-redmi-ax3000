@@ -1,0 +1,576 @@
+From 21373a29dfc852a0910d85a51ffd5f5317c1bdc5 Mon Sep 17 00:00:00 2001
+From: Aditya Kumar Singh <adisi@codeaurora.org>
+Date: Fri, 27 Aug 2021 13:30:37 +0530
+Subject: [PATCH] ath11k: add support for new htt stats and tlv tags
+
+This change is to -
+
+A) add new htt stats support for -
+
+   33: ATH11K_DBG_HTT_EXT_STA_11AX_UL_STATS
+   Used to dump the 11ax uplink stats for station.
+
+   34: ATH11K_DBG_HTT_EXT_VDEV_RTT_RESP_STATS
+   Used to dump the RTT response stats for all vdevs.
+
+   35: ATH11K_DBG_HTT_EXT_PKTLOG_AND_HTT_RING_STATS
+   Used to dump the various no. of pktlog payloads that were dropped.
+
+   36: ATH11K_DBG_HTT_EXT_DLPAGER_STATS
+   Used to dump no. of lock/unlock pages with last 10 lock/unlock occurrences.
+
+   Usage:
+	echo X > /sys/kernel/debug/ath11k/<platform>/<mac>/htt_stats_type
+        cat /sys/kernel/debug/ath11k/<platform>/<mac>/htt_stats
+     where X can take values 33, 34, 35, 36
+
+B) add new tlv tags -
+
+   + HTT_STATS_UNSUPPORTED_ERROR_STATS_TAG
+   + HTT_STATS_UNAVAILABLE_ERROR_STATS_TAG
+   + HTT_STATS_TX_SELFGEN_AC_SCHED_STATUS_STATS_TAG
+   + HTT_STATS_TX_SELFGEN_AX_SCHED_STATUS_STATS_TAG
+   + HTT_STATS_VDEV_RTT_RESP_STATS_TAG
+   + HTT_STATS_PKTLOG_AND_HTT_RING_STATS_TAG
+   + HTT_STATS_DLPAGER_STATS_TAG
+
+Signed-off-by: Aditya Kumar Singh <adisi@codeaurora.org>
+---
+ drivers/net/wireless/ath/ath11k/debugfs.h          |   4 +
+ .../net/wireless/ath/ath11k/debugfs_htt_stats.c    | 328 +++++++++++++++++++++
+ .../net/wireless/ath/ath11k/debugfs_htt_stats.h    | 141 +++++++++
+ 3 files changed, 473 insertions(+)
+
+--- a/drivers/net/wireless/ath/ath11k/debugfs.h
++++ b/drivers/net/wireless/ath/ath11k/debugfs.h
+@@ -47,6 +47,10 @@ enum ath11k_dbg_htt_ext_stats_type {
+ 	ATH11K_DBG_HTT_EXT_STATS_PDEV_RX_RATE_EXT           =  30,
+ 	ATH11K_DBG_HTT_EXT_STATS_PDEV_TX_RATE_TXBF_STATS    =  31,
+ 	ATH11K_DBG_HTT_EXT_STATS_TXBF_OFDMA		    =  32,
++	ATH11K_DBG_HTT_EXT_STA_11AX_UL_STATS                =  33,
++	ATH11K_DBG_HTT_EXT_VDEV_RTT_RESP_STATS              =  34,
++	ATH11K_DBG_HTT_EXT_PKTLOG_AND_HTT_RING_STATS        =  35,
++	ATH11K_DBG_HTT_EXT_DLPAGER_STATS                    =  36,
+ 	ATH11K_DBG_HTT_EXT_PHY_COUNTERS_AND_PHY_STATS	    =  37,
+ 
+ 	/* keep this last */
+--- a/drivers/net/wireless/ath/ath11k/debugfs_htt_stats.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs_htt_stats.c
+@@ -5225,6 +5225,310 @@ static inline void htt_print_peer_sched_
+ 	stats_req->buf_len = len;
+ }
+ 
++static inline void
++htt_print_tx_selfgen_ac_sched_status_stats_tlv(const void *tag_buf,
++					       struct debug_htt_stats_req *stats_req)
++{
++	const struct htt_tx_selfgen_ac_sched_status_stats_tlv *htt_stats_buf = tag_buf;
++	u8 *buf = stats_req->buf;
++	u32 len = stats_req->buf_len;
++	u32 buf_len = ATH11K_HTT_STATS_BUF_SIZE;
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len,
++			   "HTT_TX_SELFGEN_AC_SCHED_STATUS_STATS_TLV:\n");
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "ac_su_ndpa_sch_status = ");
++	ARRAY_TO_BUF(buf, len, htt_stats_buf->ac_su_ndpa_sch_status,
++		     HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS);
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "\nac_su_ndp_sch_status = ");
++	ARRAY_TO_BUF(buf, len, htt_stats_buf->ac_su_ndp_sch_status,
++		     HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS);
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "\nac_mu_mimo_ndpa_sch_status = ");
++	ARRAY_TO_BUF(buf, len, htt_stats_buf->ac_mu_mimo_ndpa_sch_status,
++		     HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS);
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "\nac_mu_mimo_ndp_sch_status = ");
++	ARRAY_TO_BUF(buf, len, htt_stats_buf->ac_mu_mimo_ndp_sch_status,
++		     HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS);
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "\nac_mu_mimo_brp_sch_status = ");
++	ARRAY_TO_BUF(buf, len, htt_stats_buf->ac_mu_mimo_brp_sch_status,
++		     HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS);
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "\nac_su_ndp_sch_flag_err = ");
++	ARRAY_TO_BUF(buf, len, htt_stats_buf->ac_su_ndp_sch_flag_err,
++		     HTT_TX_SELFGEN_NUM_SCH_TSFLAG_ERROR_STATS);
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "\nac_mu_mimo_ndp_sch_flag_err = ");
++	ARRAY_TO_BUF(buf, len, htt_stats_buf->ac_mu_mimo_ndp_sch_flag_err,
++		     HTT_TX_SELFGEN_NUM_SCH_TSFLAG_ERROR_STATS);
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "\nac_mu_mimo_brp_sch_flag_err = ");
++	ARRAY_TO_BUF(buf, len, htt_stats_buf->ac_mu_mimo_brp_sch_flag_err,
++		     HTT_TX_SELFGEN_NUM_SCH_TSFLAG_ERROR_STATS);
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "\n");
++
++	if (len >= buf_len)
++		buf[buf_len - 1] = 0;
++	else
++		buf[len] = 0;
++
++	stats_req->buf_len = len;
++}
++
++static inline void
++htt_print_tx_selfgen_ax_sched_status_stats_tlv(const void *tag_buf,
++					       struct debug_htt_stats_req *stats_req)
++{
++	const struct htt_tx_selfgen_ax_sched_status_stats_tlv *htt_stats_buf = tag_buf;
++	u8 *buf = stats_req->buf;
++	u32 len = stats_req->buf_len;
++	u32 buf_len = ATH11K_HTT_STATS_BUF_SIZE;
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len,
++			   "HTT_TX_SELFGEN_AX_SCHED_STATUS_STATS_TLV:\n");
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "ax_su_ndpa_sch_status = ");
++	ARRAY_TO_BUF(buf, len, htt_stats_buf->ax_su_ndpa_sch_status,
++		     HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS);
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "\nax_su_ndp_sch_status = ");
++	ARRAY_TO_BUF(buf, len, htt_stats_buf->ax_su_ndp_sch_status,
++		     HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS);
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "\nax_mu_mimo_ndpa_sch_status = ");
++	ARRAY_TO_BUF(buf, len, htt_stats_buf->ax_mu_mimo_ndpa_sch_status,
++		     HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS);
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "\nax_mu_mimo_ndp_sch_status = ");
++	ARRAY_TO_BUF(buf, len, htt_stats_buf->ax_mu_mimo_ndp_sch_status,
++		     HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS);
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "\nax_mu_brp_sch_status = ");
++	ARRAY_TO_BUF(buf, len, htt_stats_buf->ax_mu_brp_sch_status,
++		     HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS);
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "\nax_mu_bar_sch_status = ");
++	ARRAY_TO_BUF(buf, len, htt_stats_buf->ax_mu_bar_sch_status,
++		     HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS);
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "\nax_basic_trig_sch_status = ");
++	ARRAY_TO_BUF(buf, len, htt_stats_buf->ax_basic_trig_sch_status,
++		     HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS);
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "\nax_su_ndp_sch_flag_err = ");
++	ARRAY_TO_BUF(buf, len, htt_stats_buf->ax_su_ndp_sch_flag_err,
++		     HTT_TX_SELFGEN_NUM_SCH_TSFLAG_ERROR_STATS);
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "\nax_mu_mimo_ndp_sch_flag_err = ");
++	ARRAY_TO_BUF(buf, len, htt_stats_buf->ax_mu_mimo_ndp_sch_flag_err,
++		     HTT_TX_SELFGEN_NUM_SCH_TSFLAG_ERROR_STATS);
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "\nax_mu_brp_sch_flag_err = ");
++	ARRAY_TO_BUF(buf, len, htt_stats_buf->ax_mu_brp_sch_flag_err,
++		     HTT_TX_SELFGEN_NUM_SCH_TSFLAG_ERROR_STATS);
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "\nax_mu_bar_sch_flag_err = ");
++	ARRAY_TO_BUF(buf, len, htt_stats_buf->ax_mu_bar_sch_flag_err,
++		     HTT_TX_SELFGEN_NUM_SCH_TSFLAG_ERROR_STATS);
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "\nax_basic_trig_sch_flag_err = ");
++	ARRAY_TO_BUF(buf, len, htt_stats_buf->ax_basic_trig_sch_flag_err,
++		     HTT_TX_SELFGEN_NUM_SCH_TSFLAG_ERROR_STATS);
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "\n");
++
++	if (len >= buf_len)
++		buf[buf_len - 1] = 0;
++	else
++		buf[len] = 0;
++
++	stats_req->buf_len = len;
++}
++
++static inline void
++htt_print_unavailable_error_stats_tlv(const void *tag_buf,
++				      struct debug_htt_stats_req *stats_req)
++{
++	const struct htt_stats_error_tlv *htt_stats_buf = tag_buf;
++	u8 *buf = stats_req->buf;
++	u32 len = stats_req->buf_len;
++	u32 buf_len = ATH11K_HTT_STATS_BUF_SIZE;
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "HTT_ERROR_STATS_TLV:\n");
++	len += HTT_DBG_OUT(buf + len, buf_len - len,
++			   "No stats to print for current request: %d\n",
++			   htt_stats_buf->htt_stats_type);
++
++	if (len >= buf_len)
++		buf[buf_len - 1] = 0;
++	else
++		buf[len] = 0;
++
++	stats_req->buf_len = len;
++}
++
++static inline void
++htt_print_unsupported_error_stats_tlv(const void *tag_buf,
++				      struct debug_htt_stats_req *stats_req)
++{
++	const struct htt_stats_error_tlv *htt_stats_buf = tag_buf;
++	u8 *buf = stats_req->buf;
++	u32 len = stats_req->buf_len;
++	u32 buf_len = ATH11K_HTT_STATS_BUF_SIZE;
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "HTT_ERROR_STATS_TLV:\n");
++	len += HTT_DBG_OUT(buf + len, buf_len - len,
++			   "Unsupported HTT stats type: %d\n",
++			   htt_stats_buf->htt_stats_type);
++
++	if (len >= buf_len)
++		buf[buf_len - 1] = 0;
++	else
++		buf[len] = 0;
++
++	stats_req->buf_len = len;
++}
++
++static inline void htt_print_vdev_rtt_resp_stats_tlv(const void *tag_buf,
++						     struct debug_htt_stats_req *stats_req)
++{
++	const struct htt_vdev_rtt_resp_stats_tlv *htt_stats_buf = tag_buf;
++	u8 *buf = stats_req->buf;
++	u32 len = stats_req->buf_len;
++	u32 buf_len = ATH11K_HTT_STATS_BUF_SIZE;
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "HTT_VDEV_RTT_RESP_STATS_TLV:\n");
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "vdev_id = %u\n",
++			   htt_stats_buf->vdev_id);
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "tx_ftm_suc = %u\n",
++			   htt_stats_buf->tx_ftm_suc);
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "tx_ftm_suc_retry = %u\n",
++			   htt_stats_buf->tx_ftm_suc_retry);
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "tx_ftm_fail = %u\n",
++			   htt_stats_buf->tx_ftm_fail);
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "rx_ftmr_cnt = %u\n",
++			   htt_stats_buf->rx_ftmr_cnt);
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "rx_ftmr_dup_cnt = %u\n",
++			   htt_stats_buf->rx_ftmr_dup_cnt);
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "rx_iftmr_cnt = %u\n",
++			   htt_stats_buf->rx_iftmr_cnt);
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "rx_iftmr_dup_cnt = %u\n",
++			   htt_stats_buf->rx_iftmr_dup_cnt);
++	len += HTT_DBG_OUT(buf + len, buf_len - len,
++			   "initiator_active_responder_rejected_cnt = %u\n",
++			   htt_stats_buf->initiator_active_responder_rejected_cnt);
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "responder_terminate_cnt = %u\n",
++			   htt_stats_buf->responder_terminate_cnt);
++	len += HTT_DBG_OUT(buf + len, buf_len - len,
++			   "=================================================\n");
++
++	if (len >= buf_len)
++		buf[buf_len - 1] = 0;
++	else
++		buf[len] = 0;
++
++	stats_req->buf_len = len;
++}
++
++static inline void htt_print_pktlog_and_htt_ring_stats_tlv(const void *tag_buf,
++							   struct debug_htt_stats_req *stats_req)
++{
++	const struct htt_pktlog_and_htt_ring_stats_tlv *htt_stats_buf = tag_buf;
++	u8 *buf = stats_req->buf;
++	u32 len = stats_req->buf_len;
++	u32 buf_len = ATH11K_HTT_STATS_BUF_SIZE;
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "HTT_PKTLOG_AND_HTT_RING_STATS_TLV:\n");
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "pktlog_lite_drop_cnt = %u\n",
++			   htt_stats_buf->pktlog_lite_drop_cnt);
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "pktlog_tqm_drop_cnt = %u\n",
++			   htt_stats_buf->pktlog_tqm_drop_cnt);
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "pktlog_ppdu_stats_drop_cnt = %u\n",
++			   htt_stats_buf->pktlog_ppdu_stats_drop_cnt);
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "pktlog_ppdu_ctrl_drop_cnt = %u\n",
++			   htt_stats_buf->pktlog_ppdu_ctrl_drop_cnt);
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "pktlog_sw_events_drop_cnt = %u\n",
++			   htt_stats_buf->pktlog_sw_events_drop_cnt);
++	len += HTT_DBG_OUT(buf + len, buf_len - len,
++			   "=================================================\n");
++
++	if (len >= buf_len)
++		buf[buf_len - 1] = 0;
++	else
++		buf[len] = 0;
++
++	stats_req->buf_len = len;
++}
++
++static inline void htt_print_dlpager_stats_tlv(const void *tag_buf,
++					       struct debug_htt_stats_req *stats_req)
++{
++	const struct htt_dl_pager_stats_tlv *htt_stats_buf = tag_buf;
++	u8 *buf = stats_req->buf;
++	u32 len = stats_req->buf_len;
++	u32 buf_len = ATH11K_HTT_STATS_BUF_SIZE;
++	int i;
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "HTT_DLPAGER_STATS_TLV:\n");
++	len += HTT_DBG_OUT(buf + len, buf_len - len,
++			   "=================================================\n");
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "ASYNC locked pages = %u\n",
++			   HTT_DLPAGER_ASYNC_LOCK_PAGE_COUNT_GET(htt_stats_buf->msg_dword_1));
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "SYNC locked pages = %u\n",
++			   HTT_DLPAGER_SYNC_LOCK_PAGE_COUNT_GET(htt_stats_buf->msg_dword_1));
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "Total locked pages = %u\n",
++			   HTT_DLPAGER_TOTAL_LOCKED_PAGES_GET(htt_stats_buf->msg_dword_2));
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "Total free pages = %u\n",
++			   HTT_DLPAGER_TOTAL_FREE_PAGES_GET(htt_stats_buf->msg_dword_2));
++	len += HTT_DBG_OUT(buf + len, buf_len - len,
++			   "=================================================\n");
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "LOCKED PAGES HISTORY\n");
++	len += HTT_DBG_OUT(buf + len, buf_len - len,
++			   "=================================================\n");
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "last_locked_page_idx = %u\n",
++			   (HTT_DLPAGER_LAST_LOCKED_PAGE_IDX_GET(htt_stats_buf->msg_dword_3)) ? \
++			   (HTT_DLPAGER_LAST_LOCKED_PAGE_IDX_GET(htt_stats_buf->msg_dword_3) - 1) : (HTT_DLPAGER_STATS_MAX_HIST-1));
++
++	for (i = 0; i < HTT_DLPAGER_STATS_MAX_HIST; i++) {
++		len += HTT_DBG_OUT(buf + len, buf_len - len,
++				   "Index - %u : Page Number - %u : Num of pages - %u : Timestamp - %llu us\n",
++				   i, htt_stats_buf->last_pages_info[HTT_STATS_PAGE_LOCKED][i].page_num,
++				   htt_stats_buf->last_pages_info[HTT_STATS_PAGE_LOCKED][i].num_of_pages,
++				   ((htt_stats_buf->last_pages_info[HTT_STATS_PAGE_LOCKED][i].timestamp_lsbs) |
++				    (((unsigned long long) htt_stats_buf->last_pages_info[HTT_STATS_PAGE_LOCKED][i].timestamp_msbs) << 32)));
++	}
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len,
++			   "=================================================\n");
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "UNLOCKED PAGES HISTORY\n");
++	len += HTT_DBG_OUT(buf + len, buf_len - len,
++			   "=================================================\n");
++	len += HTT_DBG_OUT(buf + len, buf_len - len, "last_unlocked_page_idx = %u\n",
++			   (HTT_DLPAGER_LAST_UNLOCKED_PAGE_IDX_GET(htt_stats_buf->msg_dword_3)) ? \
++			   (HTT_DLPAGER_LAST_UNLOCKED_PAGE_IDX_GET(htt_stats_buf->msg_dword_3) - 1) : (HTT_DLPAGER_STATS_MAX_HIST-1));
++
++	for (i = 0; i < HTT_DLPAGER_STATS_MAX_HIST; i++) {
++		len += HTT_DBG_OUT(buf + len, buf_len - len,
++				   "Index - %u : Page Number - %u : Num of pages - %u : Timestamp - %llu us\n",
++				   i, htt_stats_buf->last_pages_info[HTT_STATS_PAGE_UNLOCKED][i].page_num,
++				   htt_stats_buf->last_pages_info[HTT_STATS_PAGE_UNLOCKED][i].num_of_pages,
++				   ((htt_stats_buf->last_pages_info[HTT_STATS_PAGE_UNLOCKED][i].timestamp_lsbs) |
++				    (((unsigned long long) htt_stats_buf->last_pages_info[HTT_STATS_PAGE_UNLOCKED][i].timestamp_msbs) << 32)));
++	}
++
++	len += HTT_DBG_OUT(buf + len, buf_len - len,
++			   "=================================================\n");
++
++	if (len >= buf_len)
++		buf[buf_len - 1] = 0;
++	else
++		buf[len] = 0;
++
++	stats_req->buf_len = len;
++}
++
+ static int ath11k_dbg_htt_ext_stats_parse(struct ath11k_base *ab,
+ 					  u16 tag, u16 len, const void *tag_buf,
+ 					  void *user_data)
+@@ -5633,6 +5937,27 @@ static int ath11k_dbg_htt_ext_stats_pars
+ 	case HTT_STATS_TXBF_OFDMA_STEER_STATS_TAG:
+ 		htt_print_txbf_ofdma_steer_stats_tlv(tag_buf, stats_req);
+ 		break;
++	case HTT_STATS_TX_SELFGEN_AC_SCHED_STATUS_STATS_TAG:
++		htt_print_tx_selfgen_ac_sched_status_stats_tlv(tag_buf, stats_req);
++		break;
++	case HTT_STATS_TX_SELFGEN_AX_SCHED_STATUS_STATS_TAG:
++		htt_print_tx_selfgen_ax_sched_status_stats_tlv(tag_buf, stats_req);
++		break;
++	case HTT_STATS_UNAVAILABLE_ERROR_STATS_TAG:
++		htt_print_unavailable_error_stats_tlv(tag_buf, stats_req);
++		break;
++	case HTT_STATS_UNSUPPORTED_ERROR_STATS_TAG:
++		htt_print_unsupported_error_stats_tlv(tag_buf, stats_req);
++		break;
++	case HTT_STATS_VDEV_RTT_RESP_STATS_TAG:
++		htt_print_vdev_rtt_resp_stats_tlv(tag_buf, stats_req);
++		break;
++	case HTT_STATS_PKTLOG_AND_HTT_RING_STATS_TAG:
++		htt_print_pktlog_and_htt_ring_stats_tlv(tag_buf, stats_req);
++		break;
++	case HTT_STATS_DLPAGER_STATS_TAG:
++		htt_print_dlpager_stats_tlv(tag_buf, stats_req);
++		break;
+ 	case HTT_STATS_PHY_COUNTERS_TAG:
+ 		htt_print_phy_counters_tlv(tag_buf, stats_req);
+ 		break;
+@@ -5811,6 +6136,9 @@ static int ath11k_prep_htt_stats_cfg_par
+ 		cfg_params->cfg2 |= FIELD_PREP(GENMASK(7, 0), mac_addr[4]);
+ 		cfg_params->cfg2 |= FIELD_PREP(GENMASK(15, 8), mac_addr[5]);
+ 		break;
++	case ATH11K_DBG_HTT_EXT_VDEV_RTT_RESP_STATS:
++		cfg_params->cfg0 = HTT_STAT_DEFAULT_CFG0_ACTIVE_VDEVS;
++		break;
+ 	default:
+ 		break;
+ 	}
+--- a/drivers/net/wireless/ath/ath11k/debugfs_htt_stats.h
++++ b/drivers/net/wireless/ath/ath11k/debugfs_htt_stats.h
+@@ -116,10 +116,17 @@ enum htt_tlv_tag_t {
+ 	HTT_STATS_PDEV_CTRL_PATH_TX_STATS_TAG		    = 102,
+ 	HTT_STATS_RX_PDEV_RATE_EXT_STATS_TAG		    = 103,
+ 	HTT_STATS_PDEV_TX_RATE_TXBF_STATS_TAG		    = 108,
++	HTT_STATS_UNSUPPORTED_ERROR_STATS_TAG               = 109,
++	HTT_STATS_UNAVAILABLE_ERROR_STATS_TAG               = 110,
++	HTT_STATS_TX_SELFGEN_AC_SCHED_STATUS_STATS_TAG      = 111,
++	HTT_STATS_TX_SELFGEN_AX_SCHED_STATUS_STATS_TAG      = 112,
+ 	HTT_STATS_TXBF_OFDMA_NDPA_STATS_TAG		    = 113,
+ 	HTT_STATS_TXBF_OFDMA_NDP_STATS_TAG		    = 114,
+ 	HTT_STATS_TXBF_OFDMA_BRP_STATS_TAG		    = 115,
+ 	HTT_STATS_TXBF_OFDMA_STEER_STATS_TAG		    = 116,
++	HTT_STATS_VDEV_RTT_RESP_STATS_TAG                   = 118,
++	HTT_STATS_PKTLOG_AND_HTT_RING_STATS_TAG             = 119,
++	HTT_STATS_DLPAGER_STATS_TAG                         = 120,
+ 	HTT_STATS_PHY_COUNTERS_TAG			    = 121,
+ 	HTT_STATS_PHY_STATS_TAG				    = 122,
+ 	HTT_STATS_PHY_RESET_COUNTERS_TAG		    = 123,
+@@ -713,6 +720,35 @@ struct htt_tx_hwq_txop_used_cnt_hist_tlv
+ #define HTT_TX_PDEV_STATS_NUM_OFDMA_USER_STATS       74
+ #define HTT_TX_PDEV_STATS_NUM_UL_MUMIMO_USER_STATS    8
+ 
++enum htt_tx_err_status_t {
++	HTT_TXERR_NONE,
++	HTT_TXERR_RESP,
++
++	HTT_TXERR_FILT,
++	HTT_TXERR_FIFO,
++	HTT_TXERR_SWABORT,
++
++	HTT_TXERR_RESERVED1,
++	HTT_TXERR_RESERVED2,
++	HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS = 7,
++
++	HTT_TXERR_INVALID = 0xff,
++};
++
++enum htt_tx_selfgen_sch_tsflag_error_stats {
++	HTT_TX_SELFGEN_SCH_TSFLAG_FLUSH_RCVD_ERR,
++	HTT_TX_SELFGEN_SCH_TSFLAG_FILT_SCHED_CMD_ERR,
++	HTT_TX_SELFGEN_SCH_TSFLAG_RESP_MISMATCH_ERR,
++	HTT_TX_SELFGEN_SCH_TSFLAG_RESP_CBF_MIMO_CTRL_MISMATCH_ERR,
++	HTT_TX_SELFGEN_SCH_TSFLAG_RESP_CBF_BW_MISMATCH_ERR,
++	HTT_TX_SELFGEN_SCH_TSFLAG_RETRY_COUNT_FAIL_ERR,
++	HTT_TX_SELFGEN_SCH_TSFLAG_RESP_TOO_LATE_RECEIVED_ERR,
++	HTT_TX_SELFGEN_SCH_TSFLAG_SIFS_STALL_NO_NEXT_CMD_ERR,
++
++	HTT_TX_SELFGEN_NUM_SCH_TSFLAG_ERROR_STATS = 8,
++	HTT_TX_SELFGEN_SCH_TSFLAG_ERROR_STATS_VALID = 8
++};
++
+ struct htt_tx_selfgen_cmn_stats_tlv {
+ 	u32 mac_id__word;
+ 	u32 su_bar;
+@@ -2306,4 +2342,112 @@ struct htt_peer_sched_stats_tlv {
+ 	u32 peer_rx_active_dur_us_high;
+ 	u32 peer_curr_rate_kbps;
+ };
++
++struct htt_tx_selfgen_ac_sched_status_stats_tlv {
++	u32 ac_su_ndpa_sch_status[HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS];
++	u32 ac_su_ndp_sch_status[HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS];
++	u32 ac_su_ndp_sch_flag_err[HTT_TX_SELFGEN_NUM_SCH_TSFLAG_ERROR_STATS];
++	u32 ac_mu_mimo_ndpa_sch_status[HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS];
++	u32 ac_mu_mimo_ndp_sch_status[HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS];
++	u32 ac_mu_mimo_ndp_sch_flag_err[HTT_TX_SELFGEN_NUM_SCH_TSFLAG_ERROR_STATS];
++	u32 ac_mu_mimo_brp_sch_status[HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS];
++	u32 ac_mu_mimo_brp_sch_flag_err[HTT_TX_SELFGEN_NUM_SCH_TSFLAG_ERROR_STATS];
++};
++
++struct htt_tx_selfgen_ax_sched_status_stats_tlv {
++	u32 ax_su_ndpa_sch_status[HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS];
++	u32 ax_su_ndp_sch_status[HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS];
++	u32 ax_su_ndp_sch_flag_err[HTT_TX_SELFGEN_NUM_SCH_TSFLAG_ERROR_STATS];
++	u32 ax_mu_mimo_ndpa_sch_status[HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS];
++	u32 ax_mu_mimo_ndp_sch_status[HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS];
++	u32 ax_mu_mimo_ndp_sch_flag_err[HTT_TX_SELFGEN_NUM_SCH_TSFLAG_ERROR_STATS];
++	u32 ax_mu_brp_sch_status[HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS];
++	u32 ax_mu_brp_sch_flag_err[HTT_TX_SELFGEN_NUM_SCH_TSFLAG_ERROR_STATS];
++	u32 ax_mu_bar_sch_status[HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS];
++	u32 ax_mu_bar_sch_flag_err[HTT_TX_SELFGEN_NUM_SCH_TSFLAG_ERROR_STATS];
++	u32 ax_basic_trig_sch_status[HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS];
++	u32 ax_basic_trig_sch_flag_err[HTT_TX_SELFGEN_NUM_SCH_TSFLAG_ERROR_STATS];
++	u32 ax_ulmumimo_trig_sch_status[HTT_TX_PDEV_STATS_NUM_TX_ERR_STATUS];
++	u32 ax_ulmumimo_trig_sch_flag_err[HTT_TX_SELFGEN_NUM_SCH_TSFLAG_ERROR_STATS];
++};
++
++struct htt_stats_error_tlv {
++	u32 htt_stats_type;
++};
++
++struct htt_vdev_rtt_resp_stats_tlv {
++	u32 tx_ftm_suc;
++	u32 tx_ftm_suc_retry;
++	u32 tx_ftm_fail;
++	u32 rx_ftmr_cnt;
++	u32 rx_ftmr_dup_cnt;
++	u32 rx_iftmr_cnt;
++	u32 rx_iftmr_dup_cnt;
++	u32 initiator_active_responder_rejected_cnt;
++	u32 responder_terminate_cnt;
++	u32 vdev_id;
++};
++
++struct htt_pktlog_and_htt_ring_stats_tlv {
++	u32 pktlog_lite_drop_cnt;
++	u32 pktlog_tqm_drop_cnt;
++	u32 pktlog_ppdu_stats_drop_cnt;
++	u32 pktlog_ppdu_ctrl_drop_cnt;
++	u32 pktlog_sw_events_drop_cnt;
++};
++
++#define HTT_DLPAGER_STATS_MAX_HIST              10
++#define HTT_DLPAGER_ASYNC_LOCKED_PAGE_COUNT_M   0x000000FF
++#define HTT_DLPAGER_ASYNC_LOCKED_PAGE_COUNT_S   0
++#define HTT_DLPAGER_SYNC_LOCKED_PAGE_COUNT_M    0x0000FF00
++#define HTT_DLPAGER_SYNC_LOCKED_PAGE_COUNT_S    8
++#define HTT_DLPAGER_TOTAL_LOCKED_PAGES_M        0x0000FFFF
++#define HTT_DLPAGER_TOTAL_LOCKED_PAGES_S        0
++#define HTT_DLPAGER_TOTAL_FREE_PAGES_M          0xFFFF0000
++#define HTT_DLPAGER_TOTAL_FREE_PAGES_S          16
++#define HTT_DLPAGER_LAST_LOCKED_PAGE_IDX_M      0x0000FFFF
++#define HTT_DLPAGER_LAST_LOCKED_PAGE_IDX_S      0
++#define HTT_DLPAGER_LAST_UNLOCKED_PAGE_IDX_M    0xFFFF0000
++#define HTT_DLPAGER_LAST_UNLOCKED_PAGE_IDX_S    16
++
++#define HTT_DLPAGER_ASYNC_LOCK_PAGE_COUNT_GET(_var) \
++	(((_var) & HTT_DLPAGER_ASYNC_LOCKED_PAGE_COUNT_M) >> \
++	HTT_DLPAGER_ASYNC_LOCKED_PAGE_COUNT_S)
++#define HTT_DLPAGER_SYNC_LOCK_PAGE_COUNT_GET(_var) \
++	(((_var) & HTT_DLPAGER_SYNC_LOCKED_PAGE_COUNT_M) >> \
++	HTT_DLPAGER_SYNC_LOCKED_PAGE_COUNT_S)
++#define HTT_DLPAGER_TOTAL_LOCKED_PAGES_GET(_var)  \
++	(((_var) & HTT_DLPAGER_TOTAL_LOCKED_PAGES_M) >> \
++	HTT_DLPAGER_TOTAL_LOCKED_PAGES_S)
++#define HTT_DLPAGER_TOTAL_FREE_PAGES_GET(_var) \
++	(((_var) & HTT_DLPAGER_TOTAL_FREE_PAGES_M) >> \
++	HTT_DLPAGER_TOTAL_FREE_PAGES_S)
++#define HTT_DLPAGER_LAST_LOCKED_PAGE_IDX_GET(_var) \
++	(((_var) & HTT_DLPAGER_LAST_LOCKED_PAGE_IDX_M) >> \
++	HTT_DLPAGER_LAST_LOCKED_PAGE_IDX_S)
++#define HTT_DLPAGER_LAST_UNLOCKED_PAGE_IDX_GET(_var) \
++	(((_var) & HTT_DLPAGER_LAST_UNLOCKED_PAGE_IDX_M) >> \
++	HTT_DLPAGER_LAST_UNLOCKED_PAGE_IDX_S)
++
++enum htt_dl_pager_stats_tlv_enum {
++	HTT_STATS_PAGE_LOCKED,
++	HTT_STATS_PAGE_UNLOCKED,
++	HTT_STATS_NUM_PAGE_LOCK_STATES
++};
++
++struct dl_pager_last_pages_info {
++	u32 page_num;
++	u32 num_of_pages;
++	/* timestamp is in microsecond units, from SoC timer clock */
++	u32 timestamp_lsbs;
++	u32 timestamp_msbs;
++} __packed;
++
++struct htt_dl_pager_stats_tlv {
++	u32 msg_dword_1;
++	u32 msg_dword_2;
++	u32 msg_dword_3;
++	struct dl_pager_last_pages_info last_pages_info[HTT_STATS_NUM_PAGE_LOCK_STATES]
++						       [HTT_DLPAGER_STATS_MAX_HIST];
++} __packed;
+ #endif

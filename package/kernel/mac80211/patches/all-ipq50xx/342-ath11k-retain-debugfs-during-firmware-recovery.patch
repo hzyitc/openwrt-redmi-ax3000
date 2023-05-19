@@ -1,0 +1,417 @@
+From 508d7cfbae86d06a580bd92f2e1fc1f88af66f6b Mon Sep 17 00:00:00 2001
+From: P Praneesh <quic_ppranees@quicinc.com>
+Date: Mon, 10 Jan 2022 16:21:33 +0530
+Subject: [PATCH] ath11k: retain debugfs during firmware recovery
+
+During core restart, mac80211 add interface invokes debugfs creation
+which is not yet destroyed during firmware recovery. Below warning
+prints observed during firmware restart.
+
+debugfs: File 'mac_filter' in directory 'netdev:wlan2' already present!
+debugfs: File 'wbm_tx_completion_stats' in directory 'netdev:wlan2' already present!
+debugfs: File 'ampdu_aggr_size' in directory 'netdev:wlan2' already present!
+debugfs: File 'amsdu_aggr_size' in directory 'netdev:wlan2' already present!
+debugfs: File 'wmi_ctrl_stats' in directory 'netdev:wlan2' already present!
+
+Fix this warning by preventing debugfs re-creation during core restart.
+
+Signed-off-by: P Praneesh <quic_ppranees@quicinc.com>
+---
+ drivers/net/wireless/ath/ath11k/core.c             |  6 +-
+ drivers/net/wireless/ath/ath11k/debug_smart_ant.c  | 27 ++++++++
+ drivers/net/wireless/ath/ath11k/debugfs.c          | 78 ++++++++++++++++++++++
+ .../net/wireless/ath/ath11k/debugfs_htt_stats.c    |  7 ++
+ drivers/net/wireless/ath/ath11k/dp.c               |  7 +-
+ drivers/net/wireless/ath/ath11k/dp.h               |  2 +-
+ drivers/net/wireless/ath/ath11k/mac.c              | 12 ++--
+ 7 files changed, 128 insertions(+), 11 deletions(-)
+
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -1079,7 +1079,7 @@ err_mac_unregister:
+ err_nss_tear:
+ 	ath11k_nss_teardown(ab);
+ err_dp_pdev_free:
+-	ath11k_dp_pdev_free(ab);
++	ath11k_dp_pdev_free(ab, true);
+ err_pdev_debug:
+ 	ath11k_debugfs_pdev_destroy(ab);
+ 
+@@ -1097,7 +1097,7 @@ static void ath11k_core_pdev_destroy(str
+ 	ab->nss.enabled = false;
+ 
+ 	ath11k_hif_irq_disable(ab);
+-	ath11k_dp_pdev_free(ab);
++	ath11k_dp_pdev_free(ab, true);
+ 	ath11k_debugfs_pdev_destroy(ab);
+ }
+ 
+@@ -1401,7 +1401,7 @@ static int ath11k_core_reconfigure_on_cr
+ 	ath11k_spectral_deinit(ab);
+ 	ath11k_thermal_unregister(ab);
+ 	ath11k_hif_irq_disable(ab);
+-	ath11k_dp_pdev_free(ab);
++	ath11k_dp_pdev_free(ab, false);
+ 	ath11k_hif_stop(ab);
+ 	ath11k_wmi_detach(ab);
+ 	ath11k_dp_pdev_reo_cleanup(ab);
+--- a/drivers/net/wireless/ath/ath11k/debug_smart_ant.c
++++ b/drivers/net/wireless/ath/ath11k/debug_smart_ant.c
+@@ -56,6 +56,12 @@ static ssize_t ath11k_write_sa_enable_op
+ 		return count;
+ 
+ 	mutex_lock(&ar->conf_mutex);
++	if (ar->state != ATH11K_STATE_ON) {
++		ath11k_warn(ar->ab, "pdev %d not in ON state\n", ar->pdev->pdev_id);
++		mutex_unlock(&ar->conf_mutex);
++		return -ENETDOWN;
++	}
++
+ 	ar->smart_ant_info.enabled = enable;
+ 	if (enable) {
+ 		ret = ath11k_wmi_pdev_enable_smart_ant(ar,
+@@ -111,6 +117,14 @@ static ssize_t ath11k_write_sa_tx_ant(st
+ 	if (len < ATH11K_SA_TX_ANT_MIN_LEN)
+ 		return -EINVAL;
+ 
++	mutex_lock(&ar->conf_mutex);
++	if (ar->state != ATH11K_STATE_ON) {
++		ath11k_warn(ar->ab, "pdev %d not in ON state\n", ar->pdev->pdev_id);
++		mutex_unlock(&ar->conf_mutex);
++		return -ENETDOWN;
++	}
++	mutex_unlock(&ar->conf_mutex);
++
+ 	buf[len] = '\0';
+ 	sptr = buf;
+ 	for (i = 0; i < ETH_ALEN - 1; i++) {
+@@ -196,6 +210,11 @@ static ssize_t ath11k_write_sa_rx_ant(st
+ 		   "Setting Rx antenna to %d\n", rxant);
+ 
+ 	mutex_lock(&ar->conf_mutex);
++	if (ar->state != ATH11K_STATE_ON) {
++		ath11k_warn(ar->ab, "pdev %d not in ON state\n", ar->pdev->pdev_id);
++		mutex_unlock(&ar->conf_mutex);
++		return -ENETDOWN;
++	}
+ 	ret = ath11k_wmi_pdev_set_rx_ant(ar, rxant);
+ 	mutex_unlock(&ar->conf_mutex);
+ 
+@@ -243,6 +262,14 @@ static ssize_t ath11k_write_sa_train_inf
+ 	char *token, *sptr;
+ 	char buf[128];
+ 
++	mutex_lock(&ar->conf_mutex);
++	if (ar->state != ATH11K_STATE_ON) {
++		ath11k_warn(ar->ab, "pdev %d not in ON state\n", ar->pdev->pdev_id);
++		mutex_unlock(&ar->conf_mutex);
++		return -ENETDOWN;
++	}
++	mutex_unlock(&ar->conf_mutex);
++
+ 	if (!ath11k_smart_ant_enabled(ar))
+ 		return -ENOTSUPP;
+ 
+--- a/drivers/net/wireless/ath/ath11k/debugfs.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs.c
+@@ -17,6 +17,7 @@
+ #include "qmi.h"
+ 
+ struct dentry *debugfs_ath11k;
++struct dentry *debugfs_debug_infra;
+ 
+ static const char *htt_bp_umac_ring[HTT_SW_UMAC_RING_IDX_MAX] = {
+ 	"REO2SW1_RING",
+@@ -258,9 +259,18 @@ static ssize_t ath11k_write_wmi_ctrl_pat
+ {
+ 	struct ath11k_vif *arvif = file->private_data;
+ 	struct wmi_ctrl_path_stats_cmd_param param = {0};
++	struct ath11k *ar = arvif->ar;
+ 	u8 buf[128] = {0};
+ 	int ret;
+ 
++	mutex_lock(&ar->conf_mutex);
++	if (ar->state != ATH11K_STATE_ON) {
++		ath11k_warn(ar->ab, "pdev %d not in ON state\n", ar->pdev->pdev_id);
++		mutex_unlock(&ar->conf_mutex);
++		return -ENETDOWN;
++	}
++	mutex_unlock(&ar->conf_mutex);
++
+ 	ret = simple_write_to_buffer(buf, sizeof(buf) - 1, ppos, ubuf, count);
+ 	if (ret < 0) {
+ 		return ret;
+@@ -721,10 +731,19 @@ static ssize_t ath11k_write_ampdu_aggr_s
+ {
+ 	struct ath11k_vif *arvif = file->private_data;
+ 	struct ath11k_base *ab = arvif->ar->ab;
++	struct ath11k *ar = arvif->ar;
+ 	unsigned int tx_aggr_size = 0;
+ 	int ret;
+ 	struct set_custom_aggr_size_params params = {0};
+ 
++	mutex_lock(&ar->conf_mutex);
++	if (ar->state != ATH11K_STATE_ON) {
++		ath11k_warn(ar->ab, "pdev %d not in ON state\n", ar->pdev->pdev_id);
++		mutex_unlock(&ar->conf_mutex);
++		return -ENETDOWN;
++	}
++	mutex_unlock(&ar->conf_mutex);
++
+ 	if (kstrtouint_from_user(ubuf, count, 0, &tx_aggr_size))
+ 		return -EINVAL;
+ 
+@@ -2146,6 +2165,7 @@ void ath11k_debugfs_destroy()
+ {
+ 	debugfs_remove_recursive(debugfs_ath11k);
+ 	debugfs_ath11k = NULL;
++	debugfs_debug_infra = NULL;
+ }
+ 
+ void ath11k_debugfs_fw_stats_init(struct ath11k *ar)
+@@ -2377,6 +2397,12 @@ static ssize_t ath11k_write_simulate_rad
+ 	struct ath11k *ar = file->private_data;
+ 	int ret;
+ 
++	if (ar->state != ATH11K_STATE_ON) {
++		ath11k_warn(ar->ab, "pdev %d not in ON state\n", ar->pdev->pdev_id);
++		mutex_unlock(&ar->conf_mutex);
++		return -ENETDOWN;
++	}
++
+ 	ret = ath11k_wmi_simulate_radar(ar);
+ 	if (ret)
+ 		return ret;
+@@ -2437,6 +2463,14 @@ static ssize_t ath11k_write_btcoex(struc
+ 	if (!ar)
+ 		return -EINVAL;
+ 
++	mutex_lock(&ar->conf_mutex);
++	if (ar->state != ATH11K_STATE_ON) {
++		ath11k_warn(ar->ab, "pdev %d not in ON state\n", ar->pdev->pdev_id);
++		mutex_unlock(&ar->conf_mutex);
++		return -ENETDOWN;
++	}
++	mutex_unlock(&ar->conf_mutex);
++
+ 	buf_size = min(count, (sizeof(buf) - 1));
+ 	if (copy_from_user(buf, ubuf, buf_size))
+ 		return -EFAULT;
+@@ -2529,6 +2563,14 @@ static ssize_t ath11k_write_btcoex_duty_
+ 	if (!ar)
+ 		return -EINVAL;
+ 
++	mutex_lock(&ar->conf_mutex);
++	if (ar->state != ATH11K_STATE_ON) {
++		ath11k_warn(ar->ab, "pdev %d not in ON state\n", ar->pdev->pdev_id);
++		mutex_unlock(&ar->conf_mutex);
++		return -ENETDOWN;
++	}
++	mutex_unlock(&ar->conf_mutex);
++
+ 	if (!test_bit(ATH11K_FLAG_BTCOEX, &ar->dev_flags))
+ 		return -EINVAL;
+ 
+@@ -2620,6 +2662,12 @@ static ssize_t ath11k_write_btcoex_algo(
+ 
+ 	mutex_lock(&ar->conf_mutex);
+ 
++	if (ar->state != ATH11K_STATE_ON) {
++		ath11k_warn(ar->ab, "pdev %d not in ON state\n", ar->pdev->pdev_id);
++		mutex_unlock(&ar->conf_mutex);
++		return -ENETDOWN;
++	}
++
+ 	arvif = list_first_entry(&ar->arvifs, typeof(*arvif), list);
+ 	if (!arvif->is_started) {
+ 		ret = -EINVAL;
+@@ -2810,6 +2858,12 @@ static ssize_t ath11k_write_ps_state_ena
+ 
+ 	mutex_lock(&ar->conf_mutex);
+ 
++	if (ar->state != ATH11K_STATE_ON) {
++		ath11k_warn(ar->ab, "pdev %d not in ON state\n", ar->pdev->pdev_id);
++		ret = -ENETDOWN;
++		goto exit;
++	}
++
+ 	if (ar->ps_state_enable == ps_state_enable) {
+ 		ret = count;
+ 		goto exit;
+@@ -3100,6 +3154,14 @@ static ssize_t ath11k_athdiag_read(struc
+ 
+ 	mutex_lock(&ar->conf_mutex);
+ 
++	if (ar->state != ATH11K_STATE_ON) {
++		ath11k_warn(ar->ab, "pdev %d not in ON state\n", ar->pdev->pdev_id);
++		mutex_unlock(&ar->conf_mutex);
++		return -ENETDOWN;
++	}
++
++	mutex_unlock(&ar->conf_mutex);
++
+ 	buf = vmalloc(count);
+ 	if (!buf) {
+ 		ret = -ENOMEM;
+@@ -4046,6 +4108,12 @@ static ssize_t ath11k_write_ani_enable(s
+ 
+ 	mutex_lock(&ar->conf_mutex);
+ 
++	if (ar->state != ATH11K_STATE_ON) {
++		ath11k_warn(ar->ab, "pdev %d not in ON state\n", ar->pdev->pdev_id);
++		mutex_unlock(&ar->conf_mutex);
++		return -ENETDOWN;
++	}
++
+ 	if (ar->ani_enabled == enable) {
+ 		ret = count;
+ 		goto exit;
+@@ -4101,6 +4169,12 @@ static ssize_t ath11k_write_ani_poll_per
+ 
+ 	mutex_lock(&ar->conf_mutex);
+ 
++	if (ar->state != ATH11K_STATE_ON) {
++		ath11k_warn(ar->ab, "pdev %d not in ON state\n", ar->pdev->pdev_id);
++		mutex_unlock(&ar->conf_mutex);
++		return -ENETDOWN;
++	}
++
+ 	ret = ath11k_wmi_pdev_set_param(ar, WMI_PDEV_PARAM_ANI_POLL_PERIOD,
+ 			ani_poll_period, ar->pdev->pdev_id);
+ 	if (ret) {
+@@ -4151,6 +4225,12 @@ static ssize_t ath11k_write_ani_listen_p
+ 
+ 	mutex_lock(&ar->conf_mutex);
+ 
++	if (ar->state != ATH11K_STATE_ON) {
++		ath11k_warn(ar->ab, "pdev %d not in ON state\n", ar->pdev->pdev_id);
++		mutex_unlock(&ar->conf_mutex);
++		return -ENETDOWN;
++	}
++
+ 	ret = ath11k_wmi_pdev_set_param(ar, WMI_PDEV_PARAM_ANI_LISTEN_PERIOD,
+ 					ani_listen_period, ar->pdev->pdev_id);
+ 	if (ret) {
+--- a/drivers/net/wireless/ath/ath11k/debugfs_htt_stats.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs_htt_stats.c
+@@ -6338,6 +6338,13 @@ static ssize_t ath11k_write_htt_stats_re
+ 		return -E2BIG;
+ 
+ 	mutex_lock(&ar->conf_mutex);
++
++	if (ar->state != ATH11K_STATE_ON) {
++		ath11k_warn(ar->ab, "pdev %d not in ON state\n", ar->pdev->pdev_id);
++		mutex_unlock(&ar->conf_mutex);
++		return -ENETDOWN;
++	}
++
+ 	cfg_params.cfg0 = HTT_STAT_DEFAULT_RESET_START_OFFSET;
+ 	cfg_params.cfg1 = 1 << (cfg_params.cfg0 + type);
+ 	ret = ath11k_dp_tx_htt_h2t_ext_stats_req(ar,
+--- a/drivers/net/wireless/ath/ath11k/dp.c
++++ b/drivers/net/wireless/ath/ath11k/dp.c
+@@ -996,7 +996,7 @@ done:
+ }
+ EXPORT_SYMBOL(ath11k_dp_service_srng);
+ 
+-void ath11k_dp_pdev_free(struct ath11k_base *ab)
++void ath11k_dp_pdev_free(struct ath11k_base *ab, bool ureg_dbgfs)
+ {
+ 	struct ath11k *ar;
+ 	int i;
+@@ -1006,7 +1006,8 @@ void ath11k_dp_pdev_free(struct ath11k_b
+ 	for (i = 0; i < ab->num_radios; i++) {
+ 		ar = ab->pdevs[i].ar;
+ 		ath11k_dp_rx_pdev_free(ab, i);
+-		ath11k_debugfs_unregister(ar);
++		if (ureg_dbgfs)
++			ath11k_debugfs_unregister(ar);
+ 		ath11k_dp_rx_pdev_mon_detach(ar);
+ 	}
+ }
+@@ -1061,7 +1062,7 @@ int ath11k_dp_pdev_alloc(struct ath11k_b
+ 	return 0;
+ 
+ err:
+-	ath11k_dp_pdev_free(ab);
++	ath11k_dp_pdev_free(ab, true);
+ 
+ 	return ret;
+ }
+--- a/drivers/net/wireless/ath/ath11k/dp.h
++++ b/drivers/net/wireless/ath/ath11k/dp.h
+@@ -1988,7 +1988,7 @@ void ath11k_dp_free(struct ath11k_base *
+ int ath11k_dp_alloc(struct ath11k_base *ab);
+ int ath11k_dp_pdev_alloc(struct ath11k_base *ab);
+ void ath11k_dp_pdev_pre_alloc(struct ath11k_base *ab);
+-void ath11k_dp_pdev_free(struct ath11k_base *ab);
++void ath11k_dp_pdev_free(struct ath11k_base *ab, bool ureg_dbgfs);
+ int ath11k_dp_tx_htt_srng_setup(struct ath11k_base *ab, u32 ring_id,
+ 				int mac_id, enum hal_ring_type ring_type);
+ int ath11k_dp_peer_setup(struct ath11k *ar, int vdev_id, const u8 *addr);
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -7381,8 +7381,12 @@ static int ath11k_mac_op_add_interface(s
+ 		goto err;
+ 	}
+ 
+-	ath11k_debugfs_dbg_mac_filter(arvif);
+-	ath11k_debugfs_wbm_tx_comp_stats(arvif);
++	if (ar->state != ATH11K_STATE_RESTARTED) {
++		ath11k_debugfs_dbg_mac_filter(arvif);
++		ath11k_debugfs_wbm_tx_comp_stats(arvif);
++	} else {
++		INIT_LIST_HEAD(&arvif->mac_filters);
++	}
+ 
+ 	switch (vif->type) {
+ 	case NL80211_IFTYPE_UNSPECIFIED:
+@@ -7567,8 +7571,13 @@ static int ath11k_mac_op_add_interface(s
+ 	if (vif->type != NL80211_IFTYPE_MONITOR && ar->monitor_conf_enabled)
+ 		ath11k_mac_monitor_vdev_create(ar);
+ 
+-	ath11k_debug_aggr_size_config_init(arvif);
+-	ath11k_debugfs_wmi_ctrl_stats(arvif);
++	if (ar->state != ATH11K_STATE_RESTARTED) {
++		ath11k_debug_aggr_size_config_init(arvif);
++		ath11k_debugfs_wmi_ctrl_stats(arvif);
++	} else {
++		INIT_LIST_HEAD(&arvif->ar->debug.wmi_list);
++		init_completion(&arvif->ar->debug.wmi_ctrl_path_stats_rcvd);
++	}
+ 
+ 	mutex_unlock(&ar->conf_mutex);
+ 
+--- a/drivers/net/wireless/ath/ath11k/debug_nss.c
++++ b/drivers/net/wireless/ath/ath11k/debug_nss.c
+@@ -11,6 +11,8 @@
+ #include "debug.h"
+ #include "debug_nss.h"
+ 
++extern struct dentry *debugfs_debug_infra;
++
+ static unsigned int
+ debug_nss_fill_mpp_dump(struct ath11k_vif *arvif, char *buf, ssize_t size)
+ {
+@@ -908,16 +910,17 @@ void ath11k_debugfs_nss_mesh_vap_create(
+ 
+ void ath11k_debugfs_nss_soc_create(struct ath11k_base *ab)
+ {
+-	struct dentry *debugfs_dbg_infra;
++	if (debugfs_debug_infra)
++		return;
+ 
+-	debugfs_dbg_infra = debugfs_create_dir("dbg_infra", debugfs_ath11k);
++	debugfs_debug_infra = debugfs_create_dir("dbg_infra", debugfs_ath11k);
+ 
+ 	debugfs_create_file("links", 0200,
+-			debugfs_dbg_infra, ab,
++			debugfs_debug_infra, ab,
+ 			&fops_nss_links);
+ 
+ 	debugfs_create_file("mpp_mode", 0600,
+-			debugfs_dbg_infra, ab,
++			debugfs_debug_infra, ab,
+ 			&fops_nss_mpp_mode);
+ }
+ 

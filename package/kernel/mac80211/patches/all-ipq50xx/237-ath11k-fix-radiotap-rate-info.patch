@@ -1,0 +1,84 @@
+From 3a74003841f04a5daac160e26c51d81c1dd99fd7 Mon Sep 17 00:00:00 2001
+From: Anilkumar Kolli <akolli@codeaurora.org>
+Date: Mon, 25 Jan 2021 19:54:00 +0530
+Subject: ath11k: Fix rate in monior mode radiotap header
+
+Packet Rate info is not part of msdu in mon_dst_ring,
+rate is updated from monitor status ring.
+
+Signed-off-by: Anilkumar Kolli <akolli@codeaurora.org>
+---
+ drivers/net/wireless/ath/ath11k/dp_rx.c  | 20 ++++++++++++++++----
+ drivers/net/wireless/ath/ath11k/hal_rx.c |  1 +
+ 2 files changed, 17 insertions(+), 4 deletions(-)
+
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -5751,31 +5751,47 @@ ath11k_dp_rx_update_radiotap_he_mu(struc
+ 	rtap_buf[rtap_len] = rx_status->he_RU[3];
+ }
+ 
+-static void ath11k_update_radiotap(struct hal_rx_mon_ppdu_info *ppduinfo,
+-				    struct sk_buff *mon_skb,
+-				    struct ieee80211_rx_status *rxs)
++static void ath11k_update_radiotap(struct ath11k *ar,
++				   struct hal_rx_mon_ppdu_info *ppduinfo,
++				   struct sk_buff *mon_skb,
++				   struct ieee80211_rx_status *rxs)
+ {
++	struct ieee80211_supported_band *sband;
+ 	u8 *ptr = NULL;
+ 
++	rxs->flag |= RX_FLAG_MACTIME_START;
++	rxs->signal = ppduinfo->rssi_comb + ATH11K_DEFAULT_NOISE_FLOOR;
++	/* Incase if ppduinfo->nss is 0 TLVs are not processed in
++	 * ath11k_hal_rx_parse_mon_status_tlv, 0 nss cause warning
++	 * in mac80211 so to avoid that issue filling it with
++	 * minimum nss
++	 */
++	rxs->nss = ppduinfo->nss ? ppduinfo->nss : ppduinfo->nss + 1;
++
+ 	if (ppduinfo->he_mu_flags) {
+ 		rxs->flag |= RX_FLAG_RADIOTAP_HE_MU;
+ 		rxs->encoding = RX_ENC_HE;
+ 		ptr = skb_push(mon_skb, sizeof(struct ieee80211_radiotap_he_mu));
+ 		ath11k_dp_rx_update_radiotap_he_mu(ppduinfo, ptr);
+-	}
+-	if (ppduinfo->he_flags) {
++	} else if (ppduinfo->he_flags) {
+ 		rxs->flag |= RX_FLAG_RADIOTAP_HE;
+ 		rxs->encoding = RX_ENC_HE;
+ 		ptr = skb_push(mon_skb, sizeof(struct ieee80211_radiotap_he));
+ 		ath11k_dp_rx_update_radiotap_he(ppduinfo, ptr);
++		rxs->rate_idx = ppduinfo->rate;
++	} else if (ppduinfo->vht_flags) {
++		rxs->encoding = RX_ENC_VHT;
++		rxs->rate_idx = ppduinfo->rate;
++	} else if (ppduinfo->ht_flags) {
++		rxs->encoding = RX_ENC_HT;
++		rxs->rate_idx = ppduinfo->rate;
++	} else {
++		rxs->encoding = RX_ENC_LEGACY;
++		sband = &ar->mac.sbands[rxs->band];
++		rxs->rate_idx = ath11k_mac_hw_rate_to_idx(sband, ppduinfo->rate,
++							  ppduinfo->cck_flag);
+ 	}
+ 
+-	rxs->flag |= RX_FLAG_MACTIME_START;
+-	rxs->signal = ppduinfo->rssi_comb + ATH11K_DEFAULT_NOISE_FLOOR;
+-
+-	if (ppduinfo->nss)
+-		rxs->nss = ppduinfo->nss;
+-
+ 	rxs->mactime = ppduinfo->tsft;
+ }
+ 
+@@ -5810,7 +5826,7 @@ static int ath11k_dp_rx_mon_deliver(stru
+ 			rxs->flag |= RX_FLAG_ALLOW_SAME_PN;
+ 		}
+ 		rxs->flag |= RX_FLAG_ONLY_MONITOR;
+-		ath11k_update_radiotap(ppduinfo, mon_skb, rxs);
++		ath11k_update_radiotap(ar, ppduinfo, mon_skb, rxs);
+ 		ath11k_dp_rx_deliver_msdu(ar, napi, mon_skb, rxs);
+ 		mon_skb = skb_next;
+ 	} while (mon_skb);

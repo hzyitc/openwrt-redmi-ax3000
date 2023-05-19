@@ -1,0 +1,99 @@
+From b5bfeffefa42662acc7b9a03e365f2964aa5f0d5 Mon Sep 17 00:00:00 2001
+From: Aditya Kumar Singh <adisi@codeaurora.org>
+Date: Thu, 30 Sep 2021 13:33:11 +0530
+Subject: [PATCH] ath11k: fix vdev start-restart sequence
+
+Upon chanctx change, the driver brings down the corresponding
+vdev(s) and directly restart it hence forming a sequence
+vdev_start -> vdev_restart. But if vdev is already down then it
+should follow vdev_start -> vdev_stop -> vdev_start. This change
+fixes this sequence. If vdev(s) are already up, then it will be
+directly restarted.
+
+Signed-off-by: Aditya Kumar Singh <adisi@codeaurora.org>
+---
+ drivers/net/wireless/ath/ath11k/mac.c | 33 ++++++++++++++++++++++++++++-----
+ 1 file changed, 28 insertions(+), 5 deletions(-)
+
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -7506,10 +7506,29 @@ static int ath11k_mac_vdev_start(struct
+ 
+ static int ath11k_mac_vdev_restart(struct ath11k_vif *arvif,
+ 				   const struct cfg80211_chan_def *chandef,
+-				   bool radar_enabled)
++				   bool radar_enabled, bool pseudo_restart)
+ {
+-	return ath11k_mac_vdev_start_restart(arvif, chandef, true,
+-					     radar_enabled);
++	struct ath11k_base *ab = arvif->ar->ab;
++	int ret;
++
++	if (!pseudo_restart)
++		return ath11k_mac_vdev_start_restart(arvif, chandef, true,
++						     radar_enabled);
++
++	ret = ath11k_mac_vdev_stop(arvif);
++	if (ret) {
++		ath11k_warn(ab, "failed to stop vdev %i: %d during restart\n",
++			    arvif->vdev_id, ret);
++		return ret;
++	}
++
++	ret = ath11k_mac_vdev_start(arvif, chandef, radar_enabled);
++	if (ret) {
++		ath11k_warn(ab, "failed to start vdev %i: %d during restart\n",
++			    arvif->vdev_id, ret);
++		arvif->is_started = false;
++	}
++	return ret;
+ }
+ 
+ struct ath11k_mac_change_chanctx_arg {
+@@ -7561,6 +7580,14 @@ ath11k_mac_update_vif_chan(struct ath11k
+ 	int ret;
+ 	int i;
+ 	bool monitor_vif = false;
++	u64 vif_down_failed_map = 0;
++
++	/* Each vif is mapped to each bit of vif_down_failed_map. */
++	if (n_vifs > sizeof(vif_down_failed_map)*__CHAR_BIT__) {
++		ath11k_warn(ar->ab, "%d n_vifs are not supported currently\n",
++			    n_vifs);
++		return;
++	}
+ 
+ 	lockdep_assert_held(&ar->conf_mutex);
+ 
+@@ -7590,6 +7617,7 @@ ath11k_mac_update_vif_chan(struct ath11k
+ 
+ 		ret = ath11k_wmi_vdev_down(ar, arvif->vdev_id);
+ 		if (ret) {
++			vif_down_failed_map |= (u64)(1 << i);
+ 			ath11k_warn(ab, "failed to down vdev %d: %d\n",
+ 				    arvif->vdev_id, ret);
+ 			continue;
+@@ -7612,8 +7640,21 @@ ath11k_mac_update_vif_chan(struct ath11k
+ 		if (WARN_ON(!arvif->is_started))
+ 			continue;
+ 
+-		ret = ath11k_mac_vdev_restart(arvif, &vifs[i].new_ctx->def,
+-					      vifs[i].new_ctx->radar_enabled);
++		/* If a bit in vif_down_failed_map is set, that means
++		 * that vdev is still up, hence, sequence vdev_start->vdev_up
++		 * vdev_restart will be followed. If its not set then the
++		 * vdev is down and hence vdev_down->vdev_stop->vdev_start
++		 * sequence will be followed.
++		 */
++		if (vif_down_failed_map & (u64)(1<<i))
++			ret = ath11k_mac_vdev_restart(arvif, &vifs[i].new_ctx->def,
++						      vifs[i].new_ctx->radar_enabled,
++						      false);
++		else
++			ret = ath11k_mac_vdev_restart(arvif, &vifs[i].new_ctx->def,
++						      vifs[i].new_ctx->radar_enabled,
++						      true);
++
+ 		if (ret) {
+ 			ath11k_warn(ab, "failed to restart vdev %d: %d\n",
+ 				    arvif->vdev_id, ret);
