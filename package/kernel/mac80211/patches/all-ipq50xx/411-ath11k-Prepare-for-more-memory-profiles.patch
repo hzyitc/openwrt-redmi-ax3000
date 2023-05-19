@@ -1,0 +1,279 @@
+From 99d505dbbe92a014b137940c8f88fb6b3ce3c31c Mon Sep 17 00:00:00 2001
+From: hzy <hzyitc@outlook.com>
+Date: Fri, 20 Jan 2023 10:55:55 +0000
+Subject: [PATCH 1/2] ath11k: Prepare for more memory profiles
+
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/net/wireless/ath/ath11k/Kconfig   | 16 +++++++++++-----
+ drivers/net/wireless/ath/ath11k/debugfs.c |  2 +-
+ drivers/net/wireless/ath/ath11k/dp_rx.c   |  4 ++--
+ drivers/net/wireless/ath/ath11k/dp_tx.c   |  2 +-
+ drivers/net/wireless/ath/ath11k/hw.c      | 22 +++++++++++-----------
+ drivers/net/wireless/ath/ath11k/hw.h      |  7 +++----
+ drivers/net/wireless/ath/ath11k/qmi.h     |  2 +-
+ drivers/net/wireless/ath/ath11k/rx_desc.h |  4 ++--
+ local-symbols                             |  1 +
+ 9 files changed, 33 insertions(+), 27 deletions(-)
+
+diff --git a/drivers/net/wireless/ath/ath11k/Kconfig b/drivers/net/wireless/ath/ath11k/Kconfig
+index 92ed15a..29ffb44 100644
+--- a/drivers/net/wireless/ath/ath11k/Kconfig
++++ b/drivers/net/wireless/ath/ath11k/Kconfig
+@@ -79,12 +79,18 @@ config ATH11K_PKTLOG
+ 	log uses ring buffer to dump the data. The buffer size,
+ 	frame filters can be alterted by debugfs entries.
+ 
+-config ATH11K_MEM_PROFILE_512M
+-	bool "ath11k enable 512MB memory profile"
++choice
++	prompt "QCA ath11k memory profile"
+ 	depends on ATH11K
+-	default n
+-	---help---
+-	Enables 512MB memory profile for ath11k
++	default ATH11K_MEM_PROFILE_1G
++
++config ATH11K_MEM_PROFILE_512M
++	bool "512MB"
++
++config ATH11K_MEM_PROFILE_1G
++	bool "1GB"
++
++endchoice
+ 
+ config ATH11K_CFR
+ 	bool "QCA ath11k CFR support"
+diff --git a/drivers/net/wireless/ath/ath11k/debugfs.c b/drivers/net/wireless/ath/ath11k/debugfs.c
+index aceca2a..be7ae95 100644
+--- a/drivers/net/wireless/ath/ath11k/debugfs.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs.c
+@@ -3060,7 +3060,7 @@ static ssize_t ath11k_dump_mgmt_stats(struct file *file, char __user *ubuf,
+ 				      size_t count, loff_t *ppos)
+ {
+ 	struct ath11k *ar = file->private_data;
+-#ifndef CPTCFG_ATH11K_MEM_PROFILE_512M
++#ifdef CPTCFG_ATH11K_MEM_PROFILE_1G
+ 	struct ath11k_base *ab = ar->ab;
+ #endif
+ 	struct ath11k_vif *arvif = NULL;
+diff --git a/drivers/net/wireless/ath/ath11k/dp_rx.c b/drivers/net/wireless/ath/ath11k/dp_rx.c
+index fa86e0a..cfaad2f 100644
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -330,7 +330,7 @@ static inline u8* ath11k_dp_rxdesc_get_mpdu_start_addr2(struct ath11k_base *ab,
+ 	return ab->hw_params.hw_ops->rx_desc_mpdu_start_addr2(desc);
+ }
+ 
+-#ifdef CPTCFG_ATH11K_MEM_PROFILE_512M
++#ifndef CPTCFG_ATH11K_MEM_PROFILE_1G
+ static void ath11k_dp_get_rx_header_offset(struct ath11k_base *ab,
+ 					   struct htt_rx_ring_tlv_filter *tlv_filter)
+ {
+@@ -5459,7 +5459,7 @@ void ath11k_dp_rx_pdev_free(struct ath11k_base *ab, int mac_id)
+ 	ath11k_dp_rxdma_pdev_buf_free(ar);
+ }
+ 
+-#ifdef CPTCFG_ATH11K_MEM_PROFILE_512M
++#ifndef CPTCFG_ATH11K_MEM_PROFILE_1G
+ static int ath11k_dp_rxdma_ring_sel_config(struct ath11k *ar)
+ {
+ 	struct ath11k_pdev_dp *dp = &ar->dp;
+diff --git a/drivers/net/wireless/ath/ath11k/dp_tx.c b/drivers/net/wireless/ath/ath11k/dp_tx.c
+index 4bfe48f..e043e7e 100644
+--- a/drivers/net/wireless/ath/ath11k/dp_tx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_tx.c
+@@ -247,7 +247,7 @@ int ath11k_dp_tx(struct ath11k *ar, struct ath11k_vif *arvif,
+ 	 * If all rings are full, we drop the packet.
+ 	 * //TODO Add throttling logic when all rings are full
+ 	 */
+-#ifdef CPTCFG_ATH11K_MEM_PROFILE_512M
++#ifndef CPTCFG_ATH11K_MEM_PROFILE_1G
+ 	if (unlikely(atomic_read(&ab->num_max_allowed) > DP_TX_COMP_MAX_ALLOWED)) {
+ 		atomic_inc(&ab->soc_stats.tx_err.max_fail);
+  		return -ENOSPC;
+diff --git a/drivers/net/wireless/ath/ath11k/hw.c b/drivers/net/wireless/ath/ath11k/hw.c
+index f6ae6e3..1f26238 100644
+--- a/drivers/net/wireless/ath/ath11k/hw.c
++++ b/drivers/net/wireless/ath/ath11k/hw.c
+@@ -207,7 +207,7 @@ static u8 ath11k_hw_ipq8074_rx_desc_get_l3_pad_bytes(struct hal_rx_desc *desc)
+ 
+ static u8 *ath11k_hw_ipq8074_rx_desc_get_hdr_status(struct hal_rx_desc *desc)
+ {
+-#ifndef CPTCFG_ATH11K_MEM_PROFILE_512M
++#ifdef CPTCFG_ATH11K_MEM_PROFILE_1G
+ 	return desc->u.ipq8074.hdr_status;
+ #else
+ 	return NULL;
+@@ -407,7 +407,7 @@ u32 ath11k_hw_ipq8074_rx_desc_get_hal_mpdu_len(struct hal_rx_mpdu_info *mpdu_inf
+ 			 __le32_to_cpu(mpdu_info->u.ipq8074.info2));
+ }
+ 
+-#ifdef CPTCFG_ATH11K_MEM_PROFILE_512M
++#ifndef CPTCFG_ATH11K_MEM_PROFILE_1G
+ static void ath11k_hw_ipq8074_rx_desc_get_offset(struct htt_rx_ring_tlv_filter *tlv_filter)
+ {
+ 	tlv_filter->rx_mpdu_end_offset = __le16_to_cpu(offsetof
+@@ -544,7 +544,7 @@ static u8 ath11k_hw_qcn9074_rx_desc_get_l3_pad_bytes(struct hal_rx_desc *desc)
+ 
+ static u8 *ath11k_hw_qcn9074_rx_desc_get_hdr_status(struct hal_rx_desc *desc)
+ {
+-#ifndef CPTCFG_ATH11K_MEM_PROFILE_512M
++#ifdef CPTCFG_ATH11K_MEM_PROFILE_1G
+ 	return desc->u.qcn9074.hdr_status;
+ #else
+ 	return NULL;
+@@ -755,7 +755,7 @@ u32 ath11k_hw_qcn9074_rx_desc_get_hal_mpdu_len(struct hal_rx_mpdu_info *mpdu_inf
+ 			 __le32_to_cpu(mpdu_info->u.qcn9074.info2));
+ }
+ 
+-#ifdef CPTCFG_ATH11K_MEM_PROFILE_512M
++#ifndef CPTCFG_ATH11K_MEM_PROFILE_1G
+ static void ath11k_hw_qcn9074_rx_desc_get_offset(struct htt_rx_ring_tlv_filter *tlv_filter)
+ {
+ 	tlv_filter->rx_mpdu_end_offset = __le16_to_cpu(offsetof
+@@ -1069,7 +1069,7 @@ const struct ath11k_hw_ops ipq8074_ops = {
+ 	.get_reo_dest_remap_config = ath11k_get_reo_dest_remap_config_default,
+ 	.rx_desc_get_hal_mpdu_peerid = ath11k_hw_ipq8074_rx_desc_get_hal_mpdu_peerid,
+ 	.rx_desc_get_hal_mpdu_len = ath11k_hw_ipq8074_rx_desc_get_hal_mpdu_len,
+-#ifdef CPTCFG_ATH11K_MEM_PROFILE_512M
++#ifndef CPTCFG_ATH11K_MEM_PROFILE_1G
+ 	.rx_desc_get_offset = ath11k_hw_ipq8074_rx_desc_get_offset,
+ #endif
+ 	.rx_desc_get_mpdu_frame_ctl = ath11k_hw_ipq8074_rx_desc_get_mpdu_frame_ctl,
+@@ -1121,7 +1121,7 @@ const struct ath11k_hw_ops ipq6018_ops = {
+ 	.get_reo_dest_remap_config = ath11k_get_reo_dest_remap_config_default,
+ 	.rx_desc_get_hal_mpdu_peerid = ath11k_hw_ipq8074_rx_desc_get_hal_mpdu_peerid,
+ 	.rx_desc_get_hal_mpdu_len = ath11k_hw_ipq8074_rx_desc_get_hal_mpdu_len,
+-#ifdef CPTCFG_ATH11K_MEM_PROFILE_512M
++#ifndef CPTCFG_ATH11K_MEM_PROFILE_1G
+ 	.rx_desc_get_offset = ath11k_hw_ipq8074_rx_desc_get_offset,
+ #endif
+ 	.rx_desc_get_mpdu_frame_ctl = ath11k_hw_ipq8074_rx_desc_get_mpdu_frame_ctl,
+@@ -1169,7 +1169,7 @@ const struct ath11k_hw_ops qca6390_ops = {
+ 	.get_reo_dest_remap_config = ath11k_get_reo_dest_remap_config_default,
+ 	.rx_desc_get_hal_mpdu_peerid = ath11k_hw_ipq8074_rx_desc_get_hal_mpdu_peerid,
+ 	.rx_desc_get_hal_mpdu_len = ath11k_hw_ipq8074_rx_desc_get_hal_mpdu_len,
+-#ifdef CPTCFG_ATH11K_MEM_PROFILE_512M
++#ifndef CPTCFG_ATH11K_MEM_PROFILE_1G
+ 	.rx_desc_get_offset = ath11k_hw_ipq8074_rx_desc_get_offset,
+ #endif
+ 	.rx_desc_get_mpdu_frame_ctl = ath11k_hw_ipq8074_rx_desc_get_mpdu_frame_ctl,
+@@ -1225,7 +1225,7 @@ const struct ath11k_hw_ops qcn9074_ops = {
+ 	.get_reo_dest_remap_config = ath11k_get_reo_dest_remap_config_default,
+ 	.rx_desc_get_hal_mpdu_peerid = ath11k_hw_qcn9074_rx_desc_get_hal_mpdu_peerid,
+ 	.rx_desc_get_hal_mpdu_len = ath11k_hw_qcn9074_rx_desc_get_hal_mpdu_len,
+-#ifdef CPTCFG_ATH11K_MEM_PROFILE_512M
++#ifndef CPTCFG_ATH11K_MEM_PROFILE_1G
+ 	.rx_desc_get_offset = ath11k_hw_qcn9074_rx_desc_get_offset,
+ #endif
+ 	.rx_desc_get_mpdu_frame_ctl = ath11k_hw_qcn9074_rx_desc_get_mpdu_frame_ctl,
+@@ -1278,7 +1278,7 @@ const struct ath11k_hw_ops ipq5018_ops = {
+ 	.rx_desc_get_hal_mpdu_peerid = ath11k_hw_qcn9074_rx_desc_get_hal_mpdu_peerid,
+ 	.rx_desc_get_hal_mpdu_len = ath11k_hw_qcn9074_rx_desc_get_hal_mpdu_len,
+ 	.get_reo_dest_remap_config = ath11k_get_reo_dest_remap_config_5018,
+-#ifdef CPTCFG_ATH11K_MEM_PROFILE_512M
++#ifndef CPTCFG_ATH11K_MEM_PROFILE_1G
+ 	.rx_desc_get_offset = ath11k_hw_qcn9074_rx_desc_get_offset,
+ #endif
+ 	.rx_desc_get_mpdu_frame_ctl = ath11k_hw_qcn9074_rx_desc_get_mpdu_frame_ctl,
+@@ -1330,7 +1330,7 @@ const struct ath11k_hw_ops qcn6122_ops = {
+ 	.rx_desc_get_hal_mpdu_peerid = ath11k_hw_qcn9074_rx_desc_get_hal_mpdu_peerid,
+ 	.rx_desc_get_hal_mpdu_len = ath11k_hw_qcn9074_rx_desc_get_hal_mpdu_len,
+ 	.get_reo_dest_remap_config = ath11k_get_reo_dest_remap_config_5018,
+-#ifdef CPTCFG_ATH11K_MEM_PROFILE_512M
++#ifndef CPTCFG_ATH11K_MEM_PROFILE_1G
+ 	.rx_desc_get_offset = ath11k_hw_qcn9074_rx_desc_get_offset,
+ #endif
+ 	.rx_desc_get_mpdu_frame_ctl = ath11k_hw_qcn9074_rx_desc_get_mpdu_frame_ctl,
+@@ -1382,7 +1382,7 @@ const struct ath11k_hw_ops ipq9574_ops = {
+ 	.get_reo_dest_remap_config = ath11k_get_reo_dest_remap_config_default,
+ 	.rx_desc_get_hal_mpdu_peerid = ath11k_hw_ipq8074_rx_desc_get_hal_mpdu_peerid,
+ 	.rx_desc_get_hal_mpdu_len = ath11k_hw_ipq8074_rx_desc_get_hal_mpdu_len,
+-#ifdef CPTCFG_ATH11K_MEM_PROFILE_512M
++#ifndef CPTCFG_ATH11K_MEM_PROFILE_1G
+ 	.rx_desc_get_offset = ath11k_hw_ipq8074_rx_desc_get_offset,
+ #endif
+ 	.rx_desc_get_mpdu_frame_ctl = ath11k_hw_ipq8074_rx_desc_get_mpdu_frame_ctl,
+diff --git a/drivers/net/wireless/ath/ath11k/hw.h b/drivers/net/wireless/ath/ath11k/hw.h
+index bd2680d..efde50a 100644
+--- a/drivers/net/wireless/ath/ath11k/hw.h
++++ b/drivers/net/wireless/ath/ath11k/hw.h
+@@ -12,8 +12,7 @@ struct ath11k_csi_cfr_header;
+ struct ath11k_cfr_peer_tx_param;
+ 
+ /* Target configuration defines */
+-#ifdef CPTCFG_ATH11K_MEM_PROFILE_512M
+-
++#if defined(CPTCFG_ATH11K_MEM_PROFILE_512M)
+ #define TARGET_NUM_VDEVS	8
+ #define TARGET_NUM_PEERS_PDEV	(128 + TARGET_NUM_VDEVS)
+ /* Max num of stations (per radio) */
+@@ -28,7 +27,7 @@ struct ath11k_cfr_peer_tx_param;
+  * 18byte mesh hdr + 8byte snap + 1500 eth payload
+  */
+ #define ATH11K_DP_RXDMA_NSS_REFILL_RING_SIZE	1816
+-#else
++#else // CPTCFG_ATH11K_MEM_PROFILE_1G
+ /* Num VDEVS per radio */
+ #define TARGET_NUM_VDEVS	(ab->hw_params.num_vdevs_peers[ab->qmi.target_mem_mode].num_vdevs)
+ #define TARGET_NUM_PEERS_PDEV	(ab->hw_params.num_vdevs_peers[ab->qmi.target_mem_mode].num_peers + TARGET_NUM_VDEVS)
+@@ -264,7 +263,7 @@ struct ath11k_hw_ops {
+ 	u32 (*get_reo_dest_remap_config)(void);
+ 	u16 (*rx_desc_get_hal_mpdu_peerid) (struct hal_rx_mpdu_info *mpdu_info);
+ 	u32 (*rx_desc_get_hal_mpdu_len) (struct hal_rx_mpdu_info *mpdu_info);
+-#ifdef CPTCFG_ATH11K_MEM_PROFILE_512M
++#ifndef CPTCFG_ATH11K_MEM_PROFILE_1G
+ 	void (*rx_desc_get_offset)(struct htt_rx_ring_tlv_filter *tlv_filter);
+ #endif
+ 	u16 (*rx_desc_get_mpdu_frame_ctl)(struct hal_rx_desc *desc);
+diff --git a/drivers/net/wireless/ath/ath11k/qmi.h b/drivers/net/wireless/ath/ath11k/qmi.h
+index 522516b..73cf421 100644
+--- a/drivers/net/wireless/ath/ath11k/qmi.h
++++ b/drivers/net/wireless/ath/ath11k/qmi.h
+@@ -34,7 +34,7 @@
+ #define ATH11K_QMI_MAX_QDSS_CONFIG_FILE_NAME_SIZE 64
+ #define ATH11K_QMI_DEFAULT_QDSS_CONFIG_FILE_NAME "qdss_trace_config.bin"
+ 
+-#ifdef CPTCFG_ATH11K_MEM_PROFILE_512M
++#ifndef CPTCFG_ATH11K_MEM_PROFILE_1G
+ #define ATH11K_QMI_IPQ8074_M3_DUMP_ADDRESS	0x4E800000
+ #define ATH11K_QMI_IPQ6018_M3_DUMP_ADDRESS	0x4E300000
+ #else
+diff --git a/drivers/net/wireless/ath/ath11k/rx_desc.h b/drivers/net/wireless/ath/ath11k/rx_desc.h
+index dc46b47..838ccde 100644
+--- a/drivers/net/wireless/ath/ath11k/rx_desc.h
++++ b/drivers/net/wireless/ath/ath11k/rx_desc.h
+@@ -1375,7 +1375,7 @@ struct hal_rx_desc_ipq8074 {
+ 	__le32 mpdu_end_tag;
+ 	struct rx_mpdu_end mpdu_end;
+ 	u8 rx_padding1[HAL_RX_DESC_PADDING1_BYTES];
+-#ifndef CPTCFG_ATH11K_MEM_PROFILE_512M
++#ifdef CPTCFG_ATH11K_MEM_PROFILE_1G
+ 	__le32 hdr_status_tag;
+ 	__le32 phy_ppdu_id;
+ 	u8 hdr_status[HAL_RX_DESC_HDR_STATUS_LEN];
+@@ -1396,7 +1396,7 @@ struct hal_rx_desc_qcn9074 {
+ 	__le32 mpdu_end_tag;
+ 	struct rx_mpdu_end mpdu_end;
+ 	u8 rx_padding1[HAL_RX_DESC_PADDING1_BYTES];
+-#ifndef CPTCFG_ATH11K_MEM_PROFILE_512M
++#ifdef CPTCFG_ATH11K_MEM_PROFILE_1G
+ 	__le32 hdr_status_tag;
+ 	__le32 phy_ppdu_id;
+ 	u8 hdr_status[HAL_RX_DESC_HDR_STATUS_LEN];
+diff --git a/local-symbols b/local-symbols
+index 5a44d5d..f3c5342 100644
+--- a/local-symbols
++++ b/local-symbols
+@@ -144,6 +144,7 @@ ATH11K_AHB=
+ ATH11K_PCI=
+ ATH11K_NSS_SUPPORT=
+ ATH11K_MEM_PROFILE_512M=
++ATH11K_MEM_PROFILE_1G=
+ ATH11K_DEBUG=
+ ATH11K_DEBUGFS=
+ ATH11K_TRACING=
+-- 
+2.25.1
+

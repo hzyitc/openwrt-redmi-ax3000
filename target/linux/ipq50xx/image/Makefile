@@ -40,6 +40,7 @@ define Device/redmi_ax3000
   DEVICE_DTS_CONFIG := config@mp02.1
   IMAGES := nand-factory.ubi
   DEVICE_PACKAGES := \
+	ATH11K_MEM_PROFILE_256M \
 	ath11k-firmware-ipq5018 \
 	ath11k-firmware-qcn6122 \
 	ipq-wifi-redmi_ax3000

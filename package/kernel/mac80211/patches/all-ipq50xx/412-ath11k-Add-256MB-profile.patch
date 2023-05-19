@@ -1,0 +1,99 @@
+From 55fc00a7bf50391b4c474bbb11d98b51bedb007c Mon Sep 17 00:00:00 2001
+From: hzy <hzyitc@outlook.com>
+Date: Fri, 20 Jan 2023 10:56:06 +0000
+Subject: [PATCH 2/2] ath11k: Add 256MB profile
+
+Signed-off-by: hzy <hzyitc@outlook.com>
+---
+ drivers/net/wireless/ath/ath11k/Kconfig |  3 +++
+ drivers/net/wireless/ath/ath11k/dp.h    |  2 +-
+ drivers/net/wireless/ath/ath11k/hw.h    | 20 +++++++++++++++++++-
+ local-symbols                           |  1 +
+ 4 files changed, 24 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/wireless/ath/ath11k/Kconfig b/drivers/net/wireless/ath/ath11k/Kconfig
+index 29ffb44..b46fec5 100644
+--- a/drivers/net/wireless/ath/ath11k/Kconfig
++++ b/drivers/net/wireless/ath/ath11k/Kconfig
+@@ -84,6 +84,9 @@ choice
+ 	depends on ATH11K
+ 	default ATH11K_MEM_PROFILE_1G
+ 
++config ATH11K_MEM_PROFILE_256M
++	bool "256MB"
++
+ config ATH11K_MEM_PROFILE_512M
+ 	bool "512MB"
+ 
+diff --git a/drivers/net/wireless/ath/ath11k/dp.h b/drivers/net/wireless/ath/ath11k/dp.h
+index 326843d..2cb24e7 100644
+--- a/drivers/net/wireless/ath/ath11k/dp.h
++++ b/drivers/net/wireless/ath/ath11k/dp.h
+@@ -235,7 +235,7 @@ struct ath11k_pdev_dp {
+ #define DP_REO_EXCEPTION_RING_SIZE	128
+ #define DP_REO_CMD_RING_SIZE		256
+ #define DP_REO_STATUS_RING_SIZE		2048
+-#define DP_RXDMA_BUF_RING_SIZE		4096
++#define DP_RXDMA_BUF_RING_SIZE		ATH11K_DP_RXDMA_BUF_RING_SIZE
+ #define DP_RXDMA_REFILL_RING_SIZE	ATH11K_DP_RXDMA_REFILL_RING_SIZE
+ #define DP_RXDMA_NSS_REFILL_RING_SIZE	ATH11K_DP_RXDMA_NSS_REFILL_RING_SIZE
+ #define DP_RXDMA_ERR_DST_RING_SIZE	1024
+diff --git a/drivers/net/wireless/ath/ath11k/hw.h b/drivers/net/wireless/ath/ath11k/hw.h
+index efde50a..3710128 100644
+--- a/drivers/net/wireless/ath/ath11k/hw.h
++++ b/drivers/net/wireless/ath/ath11k/hw.h
+@@ -12,13 +12,30 @@ struct ath11k_csi_cfr_header;
+ struct ath11k_cfr_peer_tx_param;
+ 
+ /* Target configuration defines */
+-#if defined(CPTCFG_ATH11K_MEM_PROFILE_512M)
++#if defined(CPTCFG_ATH11K_MEM_PROFILE_256M)
++#define TARGET_NUM_VDEVS	8
++#define TARGET_NUM_PEERS_PDEV	(128 + TARGET_NUM_VDEVS)
++/* Max num of stations (per radio) */
++#define TARGET_NUM_STATIONS	128
++#define ATH11K_QMI_TARGET_MEM_MODE	ATH11K_QMI_TARGET_MEM_MODE_512M
++#define ATH11K_DP_TX_COMP_RING_SIZE	2048
++#define ATH11K_DP_RXDMA_BUF_RING_SIZE		1024
++#define ATH11K_DP_RXDMA_MON_STATUS_RING_SIZE	512
++#define ATH11K_DP_RXDMA_MONITOR_BUF_RING_SIZE	128
++#define ATH11K_DP_RXDMA_MONITOR_DST_RING_SIZE	128
++#define ATH11K_DP_RXDMA_REFILL_RING_SIZE	2048
++/* 256b desc TLV + 4b(rounded) Pad + 30byte max nwifi header +
++ * 18byte mesh hdr + 8byte snap + 1500 eth payload
++ */
++#define ATH11K_DP_RXDMA_NSS_REFILL_RING_SIZE	1816
++#elif defined(CPTCFG_ATH11K_MEM_PROFILE_512M)
+ #define TARGET_NUM_VDEVS	8
+ #define TARGET_NUM_PEERS_PDEV	(128 + TARGET_NUM_VDEVS)
+ /* Max num of stations (per radio) */
+ #define TARGET_NUM_STATIONS	128
+ #define ATH11K_QMI_TARGET_MEM_MODE	ATH11K_QMI_TARGET_MEM_MODE_512M
+ #define ATH11K_DP_TX_COMP_RING_SIZE	8192
++#define ATH11K_DP_RXDMA_BUF_RING_SIZE		4096
+ #define ATH11K_DP_RXDMA_MON_STATUS_RING_SIZE	512
+ #define ATH11K_DP_RXDMA_MONITOR_BUF_RING_SIZE	128
+ #define ATH11K_DP_RXDMA_MONITOR_DST_RING_SIZE	128
+@@ -35,6 +52,7 @@ struct ath11k_cfr_peer_tx_param;
+ #define TARGET_NUM_STATIONS	(ab->hw_params.num_vdevs_peers[ab->qmi.target_mem_mode].num_peers)
+ #define ATH11K_QMI_TARGET_MEM_MODE	ATH11K_QMI_TARGET_MEM_MODE_DEFAULT
+ #define ATH11K_DP_TX_COMP_RING_SIZE	32768
++#define ATH11K_DP_RXDMA_BUF_RING_SIZE		4096
+ #define ATH11K_DP_RXDMA_MON_STATUS_RING_SIZE	1024
+ #define ATH11K_DP_RXDMA_MONITOR_BUF_RING_SIZE	4096
+ #define ATH11K_DP_RXDMA_MONITOR_DST_RING_SIZE	2048
+diff --git a/local-symbols b/local-symbols
+index f3c5342..4df56c6 100644
+--- a/local-symbols
++++ b/local-symbols
+@@ -143,6 +143,7 @@ ATH11K=
+ ATH11K_AHB=
+ ATH11K_PCI=
+ ATH11K_NSS_SUPPORT=
++ATH11K_MEM_PROFILE_256M=
+ ATH11K_MEM_PROFILE_512M=
+ ATH11K_MEM_PROFILE_1G=
+ ATH11K_DEBUG=
+-- 
+2.25.1
+

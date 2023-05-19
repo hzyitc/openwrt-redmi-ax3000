@@ -12,6 +12,9 @@ PKG_CONFIG_DEPENDS += \
 	CONFIG_ATH9K_TX99 \
 	CONFIG_ATH10K_LEDS \
 	CONFIG_ATH10K_THERMAL \
+	CONFIG_ATH11K_MEM_PROFILE_256M \
+	CONFIG_ATH11K_MEM_PROFILE_512M \
+	CONFIG_ATH11K_MEM_PROFILE_1G \
 	CONFIG_ATH11K_NSS_SUPPORT \
 	CONFIG_ATH_USER_REGD
 
@@ -54,8 +57,9 @@ config-$(CONFIG_ATH9K_TX99) += ATH9K_TX99
 config-$(CONFIG_ATH9K_UBNTHSR) += ATH9K_UBNTHSR
 config-$(CONFIG_ATH10K_LEDS) += ATH10K_LEDS
 config-$(CONFIG_ATH10K_THERMAL) += ATH10K_THERMAL
-# Undefine this mean larger memory
-config-$(CONFIG_TARGET_ipq50xx) += ATH11K_MEM_PROFILE_512M
+config-$(CONFIG_ATH11K_MEM_PROFILE_256M) += ATH11K_MEM_PROFILE_256M
+config-$(CONFIG_ATH11K_MEM_PROFILE_512M) += ATH11K_MEM_PROFILE_512M
+config-$(CONFIG_ATH11K_MEM_PROFILE_1G) += ATH11K_MEM_PROFILE_1G
 config-$(CONFIG_ATH11K_NSS_SUPPORT) += ATH11K_NSS_SUPPORT
 
 config-$(call config_package,ath9k-htc) += ATH9K_HTC
@@ -317,7 +321,28 @@ AHB is supported.
 endef
 
 define KernelPackage/ath11k/config
+  if PACKAGE_kmod-ath11k
 
+	choice
+		prompt "Memory profile"
+		default ATH11K_MEM_PROFILE_256M if DEFAULT_ATH11K_MEM_PROFILE_256M
+		default ATH11K_MEM_PROFILE_512M if DEFAULT_ATH11K_MEM_PROFILE_512M
+		default ATH11K_MEM_PROFILE_1G
+
+	config ATH11K_MEM_PROFILE_256M
+		bool "256MB"
+
+	config ATH11K_MEM_PROFILE_512M
+		bool "512MB"
+
+	config ATH11K_MEM_PROFILE_1G
+		bool "1GB"
+
+	endchoice
+
+  endif
+
+	# Move out to avoid recursive dependency in Kconfig
 	config ATH11K_NSS_SUPPORT
 		bool "Enable NSS support"
 		default y
