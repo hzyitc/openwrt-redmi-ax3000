@@ -36,6 +36,10 @@ jobs:
             CONFIG_PACKAGE_kmod-qca-nss-drv-pppoe=n
 
             CONFIG_PACKAGE_luci=y
+            
+            CONFIG_LUCI_LANG_zh_Hans=y
+            CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
+            CONFIG_PACKAGE_luci-i18n-opkg-zh-cn=y
           EOF
           make defconfig
 
