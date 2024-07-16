@@ -40,21 +40,22 @@ jobs:
           cat <<EOF | sed -E 's/^  //' >.config
             CONFIG_TARGET_ipq50xx=y
             CONFIG_TARGET_ipq50xx_arm=y
-            CONFIG_TARGET_MULTI_PROFILE=y
-            CONFIG_TARGET_ALL_PROFILES=y
-            CONFIG_TARGET_PER_DEVICE_ROOTFS=y
+            CONFIG_TARGET_ipq50xx_arm_DEVICE_redmi_ax3000=y
+            CONFIG_TARGET_PREINIT_IP="192.168.8.1"
+            CONFIG_TARGET_PREINIT_BROADCAST="192.168.8.255"
 
-            CONFIG_ATH11K_MEM_PROFILE_256M=y
-
-            CONFIG_IB=y
-            # CONFIG_IB_STANDALONE is not set
-            CONFIG_SDK=y
-            CONFIG_MAKE_TOOLCHAIN=y
-
+            CONFIG_BUSYBOX_DEFAULT_LSOF=y
             CONFIG_ALL_NONSHARED=y
             CONFIG_REPRODUCIBLE_DEBUG_INFO=y
 
+            CONFIG_PACKAGE_kmod-macvlan=y
+            CONFIG_LUCI_LANG_zh_Hans=y
+            CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
+            CONFIG_PACKAGE_luci-i18n-opkg-zh-cn=y
             CONFIG_PACKAGE_luci=y
+            CONFIG_PACKAGE_luci-app-firewall=y
+            CONFIG_PACKAGE_luci-app-opkg=y
+            CONFIG_PACKAGE_luci-app-upnp=y
           EOF
           make defconfig
 
