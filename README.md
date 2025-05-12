@@ -24,6 +24,23 @@ If you need more stable versions, please checkout the following branches which u
 >		wireless.radio1.channel='64'
 >	EOF
 >	```
+```shell
+# 配置无线参数
+uci -q batch <<-EOF
+  wireless.radio1.country='CN'
+  wireless.radio1.htmode='HE160'
+  wireless.radio1.channel='64'
+EOF
+
+# 提交更改并重启服务
+uci commit wireless
+service network restart
+
+# 提示等待雷达检测
+echo "等待 1 分钟以完成雷达检测..."
+sleep 60
+echo "检查 Wi-Fi 是否已启用。"
+```
 
 ## How to build
 
