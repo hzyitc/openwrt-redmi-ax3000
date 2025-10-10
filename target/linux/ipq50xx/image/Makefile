@@ -34,6 +34,24 @@ define Device/UbiFit
   IMAGE/nand-sysupgrade.bin := sysupgrade-tar | append-metadata
 endef
 
+define Device/cmcc_pz-l8
+  $(call Device/FitImage)
+  $(call Device/UbiFit)
+  SOC := ipq5000
+  DEVICE_VENDOR := CMCC
+  DEVICE_MODEL := PZ-L8
+  BLOCKSIZE := 128k
+  PAGESIZE := 2048
+  DEVICE_DTS_CONFIG := config@mp02.1
+  IMAGES := nand-factory.ubi nand-sysupgrade.bin
+  DEVICE_PACKAGES := \
+	ATH11K_MEM_PROFILE_256M \
+	ath11k-firmware-ipq5018 \
+	ath11k-firmware-qcn6122 \
+	ipq-wifi-cmcc_pz-l8
+endef
+TARGET_DEVICES += cmcc_pz-l8
+
 define Device/cmcc_rax3000q
   $(call Device/FitImage)
   $(call Device/UbiFit)
