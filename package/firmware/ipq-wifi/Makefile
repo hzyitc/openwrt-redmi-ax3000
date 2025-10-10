@@ -29,6 +29,7 @@ endef
 
 ALLWIFIBOARDS:= \
 	buffalo_wxr-5950ax12 \
+	cmcc_pz-l8 \
 	cmcc_rax3000q \
 	compex_wpq873 \
 	dynalink_dl-wrx36 \
@@ -125,6 +126,7 @@ endef
 # Add $(eval $(call generate-ipq-wifi-package,<devicename>,<display name>))
 
 $(eval $(call generate-ipq-wifi-package,buffalo_wxr-5950ax12,Buffalo WXR-5950AX12))
+$(eval $(call generate-ipq-wifi-package,cmcc_pz-l8,CMCC PZ-L8))
 $(eval $(call generate-ipq-wifi-package,cmcc_rax3000q,CMCC RAX3000Q))
 $(eval $(call generate-ipq-wifi-package,compex_wpq873,Compex WPQ-873))
 $(eval $(call generate-ipq-wifi-package,dynalink_dl-wrx36,Dynalink DL-WRX36))

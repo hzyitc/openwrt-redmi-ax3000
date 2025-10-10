@@ -9,6 +9,7 @@ board=$(board_name)
 case "$FIRMWARE" in
 	"ath11k/IPQ5018/hw1.0/caldata.bin")
 		case "$board" in
+			cmcc,pz-l8|\
 			cmcc,rax3000q|\
 			redmi,ax3000|\
 			xiaomi,cr881x)
@@ -18,6 +19,7 @@ case "$FIRMWARE" in
 		;;
 	"ath11k/qcn6122/hw1.0/caldata_1.bin")
 		case "$board" in
+			cmcc,pz-l8|\
 			cmcc,rax3000q|\
 			redmi,ax3000|\
 			xiaomi,cr881x)
