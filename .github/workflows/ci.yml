@@ -1,1 +1,66 @@
+name: Redmi AX3000 Compile ImmortalWrt with mwan3
+
+on:
+  # Manual trigger (Recommended: Click manually when compilation is needed)
+  workflow_dispatch:
+  # Optional: Scheduled trigger (e.g., 3 AM every Monday, can delete this section)
+  schedule:
+    - cron: '0 3 * * 1'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04  # Cloud-based Linux environment (provided by GitHub)
+    steps:
+      # 1. Install compilation dependencies
+      - name: Install dependency packages
+        run: |
+          sudo apt update && sudo apt upgrade -y
+          sudo apt install -y build-essential libncurses5-dev libncursesw5-dev zlib1g-dev gawk git gettext libssl-dev xsltproc wget unzip python3 python3-distutils python3-setuptools rsync curl
+
+      # 2. Pull the forked source code
+      - name: Clone source code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}  # Automatically link to your forked repository
+          fetch-depth: 1
+
+      # 3. Update feeds and install all packages (including mwan3)
+      - name: Update feeds and install packages
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      # 4. Load preset configuration (Key: Specify AX3000 model + enable mwan3)
+      - name: Configure compilation parameters (Model + mwan3)
+        run: |
+          # Create .config file, preset Redmi AX3000 model and mwan3
+          cat > .config << 'EOF'
+          CONFIG_TARGET_ipq50xx=y
+          CONFIG_TARGET_ipq50xx_generic=y
+          CONFIG_TARGET_ipq50xx_generic_DEVICE_redmi_ax3000=y
+          # Enable mwan3 core package and LuCI management interface
+          CONFIG_PACKAGE_mwan3=y
+          CONFIG_PACKAGE_luci-app-mwan3=y
+          # Optional: Add common components (e.g., Argon theme, basic tools; can delete as needed)
+          CONFIG_PACKAGE_luci-theme-argon=y
+          CONFIG_PACKAGE_wget=y
+          CONFIG_PACKAGE_curl=y
+          EOF
+          # Automatically add dependencies (Ensure configuration takes effect and avoid compilation errors)
+          make defconfig
+
+      # 5. Start compilation (Use 4 cores, adapted to cloud servers)
+      - name: Compile firmware
+        run: |
+          make -j4 V=s  # -j4: Compile with 4 cores, balance speed and stability; V=s: Show logs (easy to troubleshoot errors)
+
+      # 6. Upload compiled firmware to GitHub Releases
+      - name: Upload firmware to Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ax3000-mwan3-${{ github.run_id }}  # Use run ID as version number to avoid duplicates
+          files: bin/targets/ipq50xx/generic/*.bin  # Upload all .bin format firmwares
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # Automatically generated token by GitHub, no manual configuration needed
 
