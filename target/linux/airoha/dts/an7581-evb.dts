@@ -211,7 +211,6 @@
 &gdm1 {
 	status = "okay";
 };
-
 &switch {
 	pinctrl-names = "default";
 	pinctrl-0 = <&mdio_pins>;
