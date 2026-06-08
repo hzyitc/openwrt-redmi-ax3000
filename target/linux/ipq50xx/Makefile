@@ -28,6 +28,7 @@ DEFAULT_PACKAGES += \
 	uboot-envtools \
 	kmod-qca-nss-dp swconfig \
 	kmod-qca-nss-drv qca-nss-fw-ipq50xx-retail \
-	kmod-ath11k wpad-basic-wolfssl
+	kmod-ath11k wpad-basic-wolfssl \
+	kmod-vxlan luci-proto-vxlan ip-full
 
 $(eval $(call BuildTarget))
