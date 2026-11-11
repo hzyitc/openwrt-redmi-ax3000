@@ -1,0 +1,162 @@
+From: seeker <gmx472@qq.com>
+Subject: [PATCH] nss: defer stats rounds instead of sleeping in the worker
+
+The stats callbacks queue the next batch immediately. Once a round ends,
+the worker spends the remainder of the one-second period in msleep().
+That uninterruptible worker contributes to load average while idle.
+
+Use the existing delayed work timer for the wait. Record the rollover
+checkpoint before requeueing: INITIAL_JIFFIES starts before zero, so a
+zero checkpoint must not continually postpone the first stats request.
+Keep the batch pacing, period, retries and callback handling unchanged.
+Use a TASK_IDLE hrtimer sleep for the short inter-batch/retry pacing too;
+this is the 5.4 usleep_range() loop with TASK_NOLOAD, preserving minimum
+sleep duration, timer slack and early-wakeup handling. Apply the same fix
+to both address families and stop work at teardown.
+
+--- a/frontends/nss/ecm_nss_common.h
++++ b/frontends/nss/ecm_nss_common.h
+@@ -32,6 +32,27 @@
+ 
+ #include <net/xfrm.h>
+ 
++#include <linux/hrtimer.h>
++#include <linux/sched.h>
++
++/*
++ * ecm_nss_common_stats_sleep()
++ * Sleep for stats pacing without counting a timer wait as system load.
++ * Match usleep_range()'s absolute deadline and early-wakeup retry loop.
++ */
++static inline void ecm_nss_common_stats_sleep(unsigned long min, unsigned long max)
++{
++	ktime_t expires = ktime_add_us(ktime_get(), min);
++	u64 delta = (u64)(max - min) * NSEC_PER_USEC;
++
++	for (;;) {
++		__set_current_state(TASK_IDLE);
++		if (!schedule_hrtimeout_range(&expires, delta, HRTIMER_MODE_ABS)) {
++			break;
++		}
++	}
++}
++
+ /*
+  * This macro converts ECM ip_addr_t to NSS IPv6 address
+  */
+--- a/frontends/nss/ecm_nss_ipv4.c
++++ b/frontends/nss/ecm_nss_ipv4.c
+@@ -772,6 +772,10 @@
+ 	int retry = 3;
+ 	unsigned long int current_jiffies;
+ 
++	if (ecm_ipv4_terminate_pending) {
++		return;
++	}
++
+ 	spin_lock_bh(&ecm_nss_ipv4_lock);
+ 	if (ecm_nss_ipv4_accelerated_count == 0) {
+ 		spin_unlock_bh(&ecm_nss_ipv4_lock);
+@@ -780,11 +784,11 @@
+ 	}
+ 	spin_unlock_bh(&ecm_nss_ipv4_lock);
+ 
+-	usleep_range(ECM_NSS_IPV4_STATS_SYNC_UDELAY - 100, ECM_NSS_IPV4_STATS_SYNC_UDELAY);
+-
+-	/*
+-	 * If index is 0, we are starting a new round, but if we still have time remain
+-	 * in this round, sleep until it ends
++	ecm_nss_common_stats_sleep(ECM_NSS_IPV4_STATS_SYNC_UDELAY - 100, ECM_NSS_IPV4_STATS_SYNC_UDELAY);
++
++	/*
++	 * If index is 0, start a new round when its deadline arrives. Let the
++	 * delayed work timer wait instead of blocking a worker in msleep().
+ 	 */
+ 	if (nicsm_req->index == 0) {
+ 		current_jiffies = jiffies;
+@@ -793,11 +797,14 @@
+ 			ecm_nss_ipv4_next_req_time = jiffies + ECM_NSS_IPV4_STATS_SYNC_PERIOD;
+ 		}
+ 
++		/* Advance this even when deferring, including before jiffies zero. */
++		ecm_nss_ipv4_roll_check_jiffies = current_jiffies;
+ 		if (time_after(ecm_nss_ipv4_next_req_time, current_jiffies)) {
+-			msleep(jiffies_to_msecs(ecm_nss_ipv4_next_req_time - current_jiffies));
+-		}
+-		ecm_nss_ipv4_roll_check_jiffies = jiffies;
+-		ecm_nss_ipv4_next_req_time = ecm_nss_ipv4_roll_check_jiffies + ECM_NSS_IPV4_STATS_SYNC_PERIOD;
++			queue_delayed_work(ecm_nss_ipv4_workqueue, &ecm_nss_ipv4_work,
++					ecm_nss_ipv4_next_req_time - current_jiffies);
++			return;
++		}
++		ecm_nss_ipv4_next_req_time = current_jiffies + ECM_NSS_IPV4_STATS_SYNC_PERIOD;
+ 	}
+ 
+ 	while (retry) {
+@@ -812,7 +819,7 @@
+ 		ecm_nss_ipv4_stats_request_fail++;
+ 		retry--;
+ 		DEBUG_TRACE("TX_NOT_OKAY, try again later\n");
+-		usleep_range(100, 200);
++		ecm_nss_common_stats_sleep(100, 200);
+ 	}
+ 
+ reschedule:
+--- a/frontends/nss/ecm_nss_ipv6.c
++++ b/frontends/nss/ecm_nss_ipv6.c
+@@ -747,6 +747,10 @@
+ 	int retry = 3;
+ 	unsigned long int current_jiffies;
+ 
++	if (ecm_ipv6_terminate_pending) {
++		return;
++	}
++
+ 	spin_lock_bh(&ecm_nss_ipv6_lock);
+ 	if (ecm_nss_ipv6_accelerated_count == 0) {
+ 		spin_unlock_bh(&ecm_nss_ipv6_lock);
+@@ -755,11 +759,11 @@
+ 	}
+ 	spin_unlock_bh(&ecm_nss_ipv6_lock);
+ 
+-	usleep_range(ECM_NSS_IPV6_STATS_SYNC_UDELAY - 100, ECM_NSS_IPV6_STATS_SYNC_UDELAY);
+-
+-	/*
+-	 * If index is 0, we are starting a new round, but if we still have time remain
+-	 * in this round, sleep until it ends
++	ecm_nss_common_stats_sleep(ECM_NSS_IPV6_STATS_SYNC_UDELAY - 100, ECM_NSS_IPV6_STATS_SYNC_UDELAY);
++
++	/*
++	 * If index is 0, start a new round when its deadline arrives. Let the
++	 * delayed work timer wait instead of blocking a worker in msleep().
+ 	 */
+ 	if (nicsm_req->index == 0) {
+ 		current_jiffies = jiffies;
+@@ -768,11 +772,14 @@
+ 			ecm_nss_ipv6_next_req_time = jiffies + ECM_NSS_IPV6_STATS_SYNC_PERIOD;
+ 		}
+ 
++		/* Advance this even when deferring, including before jiffies zero. */
++		ecm_nss_ipv6_roll_check_jiffies = current_jiffies;
+ 		if (time_after(ecm_nss_ipv6_next_req_time, current_jiffies)) {
+-			msleep(jiffies_to_msecs(ecm_nss_ipv6_next_req_time - current_jiffies));
+-		}
+-		ecm_nss_ipv6_roll_check_jiffies = jiffies;
+-		ecm_nss_ipv6_next_req_time = ecm_nss_ipv6_roll_check_jiffies + ECM_NSS_IPV6_STATS_SYNC_PERIOD;
++			queue_delayed_work(ecm_nss_ipv6_workqueue, &ecm_nss_ipv6_work,
++					ecm_nss_ipv6_next_req_time - current_jiffies);
++			return;
++		}
++		ecm_nss_ipv6_next_req_time = current_jiffies + ECM_NSS_IPV6_STATS_SYNC_PERIOD;
+ 	}
+ 
+ 	while (retry) {
+@@ -787,7 +794,7 @@
+ 		ecm_nss_ipv6_stats_request_fail++;
+ 		retry--;
+ 		DEBUG_TRACE("TX_NOT_OKAY, try again later\n");
+-		usleep_range(100, 200);
++		ecm_nss_common_stats_sleep(100, 200);
+ 	}
+ 
+ reschedule:

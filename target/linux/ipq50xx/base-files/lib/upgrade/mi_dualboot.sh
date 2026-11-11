@@ -1,6 +1,15 @@
 . /lib/functions.sh
 
+mi_dualboot_require_layout() {
+	if [ -z "$(find_mtd_index rootfs)" ] || [ -z "$(find_mtd_index rootfs_1)" ]; then
+		v "Dual-slot upgrade requires both rootfs and rootfs_1 partitions."
+		v "For a merged layout, use a recovery procedure verified for its partition table and bootloader."
+		return 1
+	fi
+}
+
 mi_dualboot_check_image() {
+	mi_dualboot_require_layout || return 1
 	local ret=0
 
 	local file_type="$( identify "$1" )"
@@ -25,6 +34,7 @@ mi_dualboot_check_image() {
 }
 
 mi_dualboot_do_upgrade() {
+	mi_dualboot_require_layout || return 1
 	mkdir -p /var/lock
 	fw_printenv >/dev/null || return 1
 

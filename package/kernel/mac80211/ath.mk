@@ -315,6 +315,7 @@ define KernelPackage/ath11k
 	$(PKG_BUILD_DIR)/drivers/net/wireless/ath/ath11k/ath11k_ahb.ko \
 	$(PKG_BUILD_DIR)/drivers/net/wireless/ath/ath11k/ath11k_pci.ko
   AUTOLOAD:=$(call AutoProbe,ath11k ath11k_ahb ath11k_pci)
+  MODPARAMS.ath11k:=$(if $(filter y,$(CONFIG_ATH11K_NSS_SUPPORT)),nss_offload=1)
 endef
 
 define KernelPackage/ath11k/description

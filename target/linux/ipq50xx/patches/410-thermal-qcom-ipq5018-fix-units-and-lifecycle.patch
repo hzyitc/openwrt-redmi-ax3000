@@ -1,0 +1,654 @@
+From: seeker <gmx472@qq.com>
+Subject: [PATCH] thermal: qcom: fix IPQ5018 units and sensor lifecycle
+
+Use milliCelsius for the thermal ABI and scale the matching DT thresholds
+and hysteresis. Convert trip writes to the calibrated ADC representation,
+propagate register errors and preserve thresholds when acknowledging alarms.
+Force acknowledgement writes even when the readback value is unchanged.
+
+Allow cold-start initialization before TSENS is enabled. Publish calibration
+before admitting IRQ work, propagate deferred probing and invalid samples,
+and quiesce IRQs and work before managed resources are released. Retrieve
+PM state from driver data and manage the added hwmon groups with devres.
+
+--- a/drivers/thermal/qcom/tsens-common.c
++++ b/drivers/thermal/qcom/tsens-common.c
+@@ -208,7 +208,8 @@
+ 	ret = regmap_field_read(priv->rf[TSENS_EN], &enabled);
+ 	if (ret)
+ 		goto err_put_device;
+-	if (!enabled) {
++	/* IPQ5018 enables its sensors after the register maps are ready. */
++	if (!enabled && priv->ops != &ops_ipq5018) {
+ 		dev_err(dev, "tsens device is not enabled\n");
+ 		ret = -ENODEV;
+ 		goto err_put_device;
+@@ -238,6 +239,7 @@
+ 		}
+ 	}
+ 
++	put_device(&op->dev);
+ 	return 0;
+ 
+ err_put_device:
+--- a/drivers/thermal/qcom/tsens-ipq5018.c
++++ b/drivers/thermal/qcom/tsens-ipq5018.c
+@@ -12,6 +12,7 @@
+ #include <linux/thermal.h>
+ #include <linux/io.h>
+ #include <linux/interrupt.h>
++#include <linux/smp.h>
+ #include "tsens.h"
+ 
+ /* TSENS register data */
+@@ -127,7 +128,7 @@
+ 			return code;
+ 	}
+ 
+-	return MAX_TEMP;
++	return -ERANGE;
+ }
+ 
+ /*
+@@ -137,6 +138,7 @@
+ 					enum tsens_trip_type trip, int temp)
+ {
+ 	u32 reg_th, th_hi, th_lo, reg_th_offset;
++	int ret, enable_ret;
+ 
+ 	if (!tmdev)
+ 		return -EINVAL;
+@@ -148,10 +150,13 @@
+ 		return -EINVAL;
+ 
+ 	temp = degc_to_code(temp, sensor);
++	if (temp < 0)
++		return temp;
+ 
+ 	reg_th_offset = TSENS_TM_UPPER_LOWER_STATUS_CTRL(sensor);
+-	regmap_read(tmdev->tm_map,
+-		TSENS_TM_UPPER_LOWER_STATUS_CTRL(sensor), &reg_th);
++	ret = regmap_read(tmdev->tm_map, reg_th_offset, &reg_th);
++	if (ret)
++		return ret;
+ 
+ 	th_hi = TSENS_TM_UPPER_THRESHOLD_VALUE(reg_th);
+ 	th_lo = TSENS_TM_LOWER_THRESHOLD_VALUE(reg_th);
+@@ -178,14 +183,18 @@
+ 		return -EINVAL;
+ 	}
+ 
+-	regmap_write(tmdev->tm_map, TSENS_TM_INT_EN_ADDR, 0);
+-	regmap_write(tmdev->tm_map, reg_th_offset, reg_th);
+-	regmap_write(tmdev->tm_map, TSENS_TM_INT_EN_ADDR, TSENS_TM_INT_EN);
++	ret = regmap_write(tmdev->tm_map, TSENS_TM_INT_EN_ADDR, 0);
++	if (ret)
++		return ret;
++
++	ret = regmap_write(tmdev->tm_map, reg_th_offset, reg_th);
++	/* Re-enable interrupts even if programming the threshold failed. */
++	enable_ret = regmap_write(tmdev->tm_map, TSENS_TM_INT_EN_ADDR, TSENS_TM_INT_EN);
+ 
+ 	/* Sync registers */
+ 	mb();
+ 
+-	return 0;
++	return ret ? ret : enable_ret;
+ }
+ 
+ static void notify_uspace_tsens_fn(struct work_struct *work)
+@@ -207,8 +216,12 @@
+ 	int i, reg_thr, temp, th_upper = 0, th_lower = 0;
+ 	u32 reg_val, reg_addr;
+ 
++	if (!smp_load_acquire(&tmdev->ready))
++		return;
++
+ 	/*Check whether TSENS is enabled */
+-	regmap_read(tmdev->srot_map, TSENS_CNTL_ADDR, &reg_val);
++	if (regmap_read(tmdev->srot_map, TSENS_CNTL_ADDR, &reg_val))
++		return;
+ 	if (!(reg_val & TSENS_SN_CTRL_EN))
+ 		return;
+ 
+@@ -217,7 +230,8 @@
+ 		/* Reset for each iteration */
+ 		reg_thr = th_upper = th_lower = 0;
+ 
+-		regmap_read(tmdev->tm_map, tmdev->sensor[i].status, &reg_val);
++		if (regmap_read(tmdev->tm_map, tmdev->sensor[i].status, &reg_val))
++			continue;
+ 
+ 		/* Check whether the temp is valid */
+ 		if (!(reg_val & TSENS_TM_SN_STATUS_VALID_BIT))
+@@ -237,16 +251,20 @@
+ 		}
+ 
+ 		if (th_upper || th_lower) {
+-			regmap_write(tmdev->tm_map, reg_addr, reg_thr);
+-			/* Notify user space */
++			/* The acknowledgement bits share the threshold register. */
++			if (regmap_write_bits(tmdev->tm_map, reg_addr, reg_thr, reg_thr))
++				continue;
++
++			if (int_clr_deassert_quirk &&
++			    regmap_write_bits(tmdev->tm_map, reg_addr, reg_thr, 0))
++				continue;
++
++			/* Notify user space after acknowledging the interrupt. */
+ 			schedule_work(&tmdev->sensor[i].notify_work);
+-
+-			if (int_clr_deassert_quirk)
+-				regmap_write(tmdev->tm_map, reg_addr, 0);
+ 
+ 			if (!get_temp_ipq5018(tmdev, i, &temp))
+ 				pr_debug("Trigger (%d degrees) for sensor %d\n",
+-					temp, i);
++					temp / 1000, i);
+ 		}
+ 	}
+ 
+@@ -260,6 +278,31 @@
+ 
+ 	schedule_work(&tmdev->tsens_work);
+ 	return IRQ_HANDLED;
++}
++
++static void disable_ipq5018(struct tsens_priv *tmdev)
++{
++	int i;
++
++	smp_store_release(&tmdev->ready, false);
++	regmap_write(tmdev->tm_map, TSENS_TM_INT_EN_ADDR, 0);
++	if (tmdev->irq_requested) {
++		disable_irq(tmdev->tsens_irq);
++		tmdev->irq_requested = false;
++	}
++	if (tmdev->irq_wake_enabled) {
++		disable_irq_wake(tmdev->tsens_irq);
++		tmdev->irq_wake_enabled = false;
++	}
++	cancel_work_sync(&tmdev->tsens_work);
++	for (i = 0; i < tmdev->num_sensors; i++)
++		cancel_work_sync(&tmdev->sensor[i].notify_work);
++	regmap_update_bits(tmdev->srot_map, TSENS_CNTL_ADDR, EN, 0);
++}
++
++static void stop_ipq5018(void *data)
++{
++	disable_ipq5018(data);
+ }
+ 
+ static int init_ipq5018(struct tsens_priv *tmdev)
+@@ -268,57 +311,60 @@
+ 	int i;
+ 	u32 reg_cntl;
+ 
+-	init_common(tmdev);
+-	if (!tmdev->tm_map)
+-		return -ENODEV;
+-
+-	/* Store all sensor address for future use */
++	if (!tmdev->num_sensors || tmdev->num_sensors > MAX_SENSOR)
++		return -EINVAL;
++	smp_store_release(&tmdev->ready, false);
++	ret = init_common(tmdev);
++	if (ret)
++		return ret;
++
+ 	for (i = 0; i < tmdev->num_sensors; i++) {
+ 		tmdev->sensor[i].status = TSENS_TM_SN_STATUS + (i * 4);
+-		INIT_WORK(&tmdev->sensor[i].notify_work,
+-						notify_uspace_tsens_fn);
+-	}
+-
++		INIT_WORK(&tmdev->sensor[i].notify_work, notify_uspace_tsens_fn);
++	}
++	INIT_WORK(&tmdev->tsens_work, tsens_scheduler_fn);
++
++	/* Keep alarms masked until calibration and its lookup tables are ready. */
++	ret = regmap_write(tmdev->tm_map, TSENS_TM_INT_EN_ADDR, 0);
++	if (ret)
++		goto err_disable;
+ 	reg_cntl = SW_RST;
+ 	ret = regmap_update_bits(tmdev->srot_map, TSENS_CNTL_ADDR, SW_RST, reg_cntl);
+ 	if (ret)
+-		return ret;
++		goto err_disable;
+ 
+ 	reg_cntl |= SLP_CLK_ENA | (MEASURE_PERIOD << 18);
+ 	reg_cntl &= ~SW_RST;
+-	ret = regmap_update_bits(tmdev->srot_map, TSENS_CONFIG_ADDR,
+-				CONFIG_MASK, CONFIG);
+-
++	ret = regmap_update_bits(tmdev->srot_map, TSENS_CONFIG_ADDR, CONFIG_MASK, CONFIG);
++	if (ret)
++		goto err_disable;
+ 	reg_cntl |= GENMASK(MAX_SENSOR - 1, 0) << SENSOR0_SHIFT;
+ 	ret = regmap_write(tmdev->srot_map, TSENS_CNTL_ADDR, reg_cntl);
+ 	if (ret)
+-		return ret;
+-
++		goto err_disable;
+ 	reg_cntl |= EN;
+ 	ret = regmap_write(tmdev->srot_map, TSENS_CNTL_ADDR, reg_cntl);
+ 	if (ret)
+-		return ret;
+-
+-	/* Init tsens worker thread */
+-	INIT_WORK(&tmdev->tsens_work, tsens_scheduler_fn);
+-
+-	/* Register and enable the ISR */
++		goto err_disable;
++
+ 	ret = devm_request_irq(tmdev->dev, tmdev->tsens_irq, tsens_isr,
+ 			IRQF_TRIGGER_RISING, "tsens_interrupt", tmdev);
+-	if (ret < 0) {
+-		pr_err("%s: request_irq FAIL: %d\n", __func__, ret);
+-		return ret;
+-	}
+-	enable_irq_wake(tmdev->tsens_irq);
+-
+-	regmap_write(tmdev->tm_map, TSENS_TM_INT_EN_ADDR, TSENS_TM_INT_EN);
++	if (ret)
++		goto err_disable;
++	tmdev->irq_requested = true;
++	/* Registered after the IRQ resource: stop work before devres frees it. */
++	ret = devm_add_action_or_reset(tmdev->dev, stop_ipq5018, tmdev);
++	if (ret)
++		return ret;
+ 
+ 	int_clr_deassert_quirk = device_property_read_bool(tmdev->dev,
+ 				"tsens-up-low-int-clr-deassert-quirk");
+-	/* Sync registers */
+ 	mb();
+-
+ 	return 0;
++
++err_disable:
++	disable_ipq5018(tmdev);
++	return ret;
+ }
+ 
+ static inline int code_to_degc(u32 adc_code, const struct tsens_sensor *s)
+@@ -343,10 +389,10 @@
+ static int calibrate_ipq5018(struct tsens_priv *tmdev)
+ {
+ 	u32 base0 = 0, base1 = 0;
+-	u32 p1[MAX_SENSOR], p2[MAX_SENSOR];
++	u32 p1[MAX_SENSOR] = {0}, p2[MAX_SENSOR] = {0};
+ 	u32 mode = 0, lsb = 0, msb = 0;
+ 	u32 *qfprom_cdata;
+-	int i, sensor;
++	int ret, i, sensor;
+ 
+ 	qfprom_cdata = (u32 *)qfprom_read(tmdev->dev, "calib");
+ 	if (IS_ERR(qfprom_cdata))
+@@ -402,12 +448,23 @@
+ 	kfree(qfprom_cdata);
+ 
+ 	for (sensor = 0; sensor < tmdev->num_sensors; sensor++) {
++		if (tmdev->sensor[sensor].slope <= 0)
++			return -EINVAL;
+ 		for (i = MIN_ADC; i <= MAX_ADC; i++) {
+ 			code2degc_lut_degc[sensor][i] = code_to_degc(i,
+ 							&tmdev->sensor[sensor]);
+ 		}
+ 	}
+ 
++	/* Publish all slopes, offsets and lookup tables before admitting IRQ work. */
++	smp_store_release(&tmdev->ready, true);
++	ret = regmap_write(tmdev->tm_map, TSENS_TM_INT_EN_ADDR, TSENS_TM_INT_EN);
++	if (ret) {
++		smp_store_release(&tmdev->ready, false);
++		return ret;
++	}
++	if (!enable_irq_wake(tmdev->tsens_irq))
++		tmdev->irq_wake_enabled = true;
+ 	return 0;
+ }
+ 
+@@ -415,19 +472,32 @@
+ {
+ 	const struct tsens_sensor *s = data;
+ 
+-	if (!s)
+-		return -EINVAL;
+-
+-	return set_trip_temp(s->priv, s->id, trip, temp);
++	if (!s || !s->priv)
++		return -EINVAL;
++	if (!smp_load_acquire(&s->priv->ready))
++		return -EAGAIN;
++
++	if (temp < MIN_TEMP * 1000 || temp > MAX_TEMP * 1000)
++		return -EINVAL;
++
++	/* The thermal ABI uses milliCelsius; the ADC lookup uses Celsius. */
++	return set_trip_temp(s->priv, s->id, trip, DIV_ROUND_CLOSEST(temp, 1000));
+ }
+ 
+ static int get_temp_ipq5018(struct tsens_priv *tmdev, int id, int *temp)
+ {
+-	const struct tsens_sensor *s = &tmdev->sensor[id];
++	const struct tsens_sensor *s;
+ 	u32 code;
+ 	unsigned int sensor_addr;
+ 	int ret, last_temp = 0, last_temp2 = 0, last_temp3 = 0;
+ 
++	if (!tmdev || !temp || id < 0 || id >= tmdev->num_sensors)
++		return -EINVAL;
++	if (!smp_load_acquire(&tmdev->ready))
++		return -EAGAIN;
++	s = &tmdev->sensor[id];
++	if (s->slope <= 0)
++		return -EINVAL;
+ 	sensor_addr = TSENS_TM_SN_STATUS + s->hw_id * 4;
+ 	ret = regmap_read(tmdev->tm_map, sensor_addr, &code);
+ 	if (ret)
+@@ -462,9 +532,11 @@
+ 		last_temp = last_temp2;
+ 	else if (last_temp2 == last_temp3)
+ 		last_temp = last_temp3;
++	else
++		return -EAGAIN;
+ done:
+-	/* Convert temperature from ADC code to Celsius */
+-	*temp = code_to_degc(last_temp, s);
++	/* Convert temperature from ADC code to milliCelsius. */
++	*temp = code_to_degc(last_temp, s) * 1000;
+ 
+ 	return 0;
+ }
+@@ -474,4 +546,5 @@
+ 	.calibrate	= calibrate_ipq5018,
+ 	.get_temp	= get_temp_ipq5018,
+ 	.set_trip_temp	= set_trip_temp_ipq5018,
++	.disable	= disable_ipq5018,
+ };
+--- a/drivers/thermal/qcom/tsens.c
++++ b/drivers/thermal/qcom/tsens.c
+@@ -11,6 +11,7 @@
+ #include <linux/slab.h>
+ #include <linux/thermal.h>
+ #include "tsens.h"
++#include "../thermal_hwmon.h"
+ 
+ static int tsens_panic_notify(void *data)
+ {
+@@ -44,8 +45,10 @@
+ 
+ static int  __maybe_unused tsens_suspend(struct device *data)
+ {
+-	struct tsens_sensor *s = (struct tsens_sensor *)data;
+-	struct tsens_priv *priv = s->priv;
++	struct tsens_priv *priv = dev_get_drvdata(data);
++
++	if (!priv)
++		return 0;
+ 
+ 	if (priv->ops && priv->ops->suspend)
+ 		return priv->ops->suspend(priv);
+@@ -55,8 +58,10 @@
+ 
+ static int __maybe_unused tsens_resume(struct device *data)
+ {
+-	struct tsens_sensor *s = (struct tsens_sensor *)data;
+-	struct tsens_priv *priv = s->priv;
++	struct tsens_priv *priv = dev_get_drvdata(data);
++
++	if (!priv)
++		return 0;
+ 
+ 	if (priv->ops && priv->ops->resume)
+ 		return priv->ops->resume(priv);
+@@ -131,9 +136,18 @@
+ 	.set_trip_activate = tsens_activate_trip_type,
+ };
+ 
++static void tsens_remove_hwmon(void *data)
++{
++	struct thermal_zone_device *tzd = data;
++
++	thermal_remove_hwmon_sysfs(tzd);
++	if (tzd->tzp)
++		tzd->tzp->no_hwmon = true;
++}
++
+ static int tsens_register(struct tsens_priv *priv)
+ {
+-	int i;
++	int i, ret, registered = 0;
+ 	struct thermal_zone_device *tzd;
+ 
+ 	for (i = 0;  i < priv->num_sensors; i++) {
+@@ -142,18 +156,38 @@
+ 		tzd = devm_thermal_zone_of_sensor_register(priv->dev, i,
+ 							   &priv->sensor[i],
+ 							   &tsens_of_ops);
+-		if (IS_ERR(tzd))
+-			continue;
++		if (IS_ERR(tzd)) {
++			ret = PTR_ERR(tzd);
++			if (ret == -ENODEV)
++				continue;
++			return ret;
++		}
++		registered++;
+ 		priv->sensor[i].tzd = tzd;
+ 		if (priv->ops->enable)
+ 			priv->ops->enable(priv, i);
+-	}
+-	return 0;
++
++		if (priv->ops == &ops_ipq5018) {
++			ret = thermal_add_hwmon_sysfs(tzd);
++			if (ret) {
++				dev_warn(priv->dev, "sensor %d hwmon registration failed: %d\n",
++					 i, ret);
++				continue;
++			}
++			if (tzd->tzp)
++				tzd->tzp->no_hwmon = false;
++			ret = devm_add_action_or_reset(priv->dev, tsens_remove_hwmon, tzd);
++			if (ret)
++				dev_warn(priv->dev, "sensor %d hwmon cleanup registration failed: %d\n",
++					 i, ret);
++		}
++	}
++	return registered ? 0 : -ENODEV;
+ }
+ 
+ static int tsens_probe(struct platform_device *pdev)
+ {
+-	int ret, i;
++	int ret, i, irq;
+ 	struct device *dev;
+ 	struct device_node *np;
+ 	struct tsens_priv *priv;
+@@ -194,7 +228,10 @@
+ 	priv->num_sensors = num_sensors;
+ 	priv->ops = data->ops;
+ 
+-	priv->tsens_irq = platform_get_irq(pdev, 0);
++	irq = platform_get_irq(pdev, 0);
++	if (irq < 0 && priv->ops == &ops_ipq5018)
++		return irq;
++	priv->tsens_irq = irq;
+ 
+ 	for (i = 0;  i < priv->num_sensors; i++) {
+ 		if (data->hw_ids)
+@@ -219,14 +256,21 @@
+ 		if (ret < 0) {
+ 			if (ret != -EPROBE_DEFER)
+ 				dev_err(dev, "tsens calibration failed\n");
+-			return ret;
++			goto err_disable;
+ 		}
+ 	}
+ 
+ 	ret = tsens_register(priv);
++	if (ret)
++		goto err_disable;
+ 
+ 	platform_set_drvdata(pdev, priv);
+ 
++	return 0;
++
++err_disable:
++	if (priv->ops->disable)
++		priv->ops->disable(priv);
+ 	return ret;
+ }
+ 
+--- a/drivers/thermal/qcom/tsens.h
++++ b/drivers/thermal/qcom/tsens.h
+@@ -319,6 +319,10 @@
+ 	const struct tsens_ops		*ops;
+ 	struct work_struct		tsens_work;
+ 	void __iomem			*iomem_base;
++	/* IPQ5018 IRQ/calibration lifecycle; ready publishes calibrated data. */
++	bool				ready;
++	bool				irq_requested;
++	bool				irq_wake_enabled;
+ 	struct tsens_sensor		sensor[0];
+ };
+ 
+--- a/arch/arm64/boot/dts/qcom/ipq5018-thermal.dtsi
++++ b/arch/arm64/boot/dts/qcom/ipq5018-thermal.dtsi
+@@ -23,26 +23,26 @@
+ 
+ 			trips {
+ 				cpu-critical-hi {
+-					temperature = <100>;
+-					hysteresis = <2>;
++					temperature = <100000>;
++					hysteresis = <2000>;
+ 					type = "critical_high";
+ 				};
+ 
+ 				cpu-config-hi {
+-					temperature = <80>;
+-					hysteresis = <2>;
++					temperature = <80000>;
++					hysteresis = <2000>;
+ 					type = "configurable_hi";
+ 				};
+ 
+ 				cpu-config-lo {
+-					temperature = <70>;
+-					hysteresis = <2>;
++					temperature = <70000>;
++					hysteresis = <2000>;
+ 					type = "configurable_lo";
+ 				};
+ 
+ 				cpu-critical-low {
+ 					temperature = <0>;
+-					hysteresis = <2>;
++					hysteresis = <2000>;
+ 					type = "critical_low";
+ 				};
+ 			};
+@@ -55,26 +55,26 @@
+ 
+ 			trips {
+ 				cpu-critical-hi {
+-					temperature = <100>;
+-					hysteresis = <2>;
++					temperature = <100000>;
++					hysteresis = <2000>;
+ 					type = "critical_high";
+ 				};
+ 
+ 				cpu-config-hi {
+-					temperature = <80>;
+-					hysteresis = <2>;
++					temperature = <80000>;
++					hysteresis = <2000>;
+ 					type = "configurable_hi";
+ 				};
+ 
+ 				cpu-config-lo {
+-					temperature = <70>;
+-					hysteresis = <2>;
++					temperature = <70000>;
++					hysteresis = <2000>;
+ 					type = "configurable_lo";
+ 				};
+ 
+ 				cpu-critical-low {
+ 					temperature = <0>;
+-					hysteresis = <2>;
++					hysteresis = <2000>;
+ 					type = "critical_low";
+ 				};
+ 			};
+@@ -87,26 +87,26 @@
+ 
+ 			trips {
+ 				cpu-critical-hi {
+-					temperature = <100>;
+-					hysteresis = <2>;
++					temperature = <100000>;
++					hysteresis = <2000>;
+ 					type = "critical_high";
+ 				};
+ 
+ 				cpu-config-hi {
+-					temperature = <80>;
+-					hysteresis = <2>;
++					temperature = <80000>;
++					hysteresis = <2000>;
+ 					type = "configurable_hi";
+ 				};
+ 
+ 				cpu-config-lo {
+-					temperature = <70>;
+-					hysteresis = <2>;
++					temperature = <70000>;
++					hysteresis = <2000>;
+ 					type = "configurable_lo";
+ 				};
+ 
+ 				cpu-critical-low {
+ 					temperature = <0>;
+-					hysteresis = <2>;
++					hysteresis = <2000>;
+ 					type = "critical_low";
+ 				};
+ 			};
+@@ -119,26 +119,26 @@
+ 
+ 			trips {
+ 				cpu-critical-hi {
+-					temperature = <100>;
+-					hysteresis = <2>;
++					temperature = <100000>;
++					hysteresis = <2000>;
+ 					type = "critical_high";
+ 				};
+ 
+ 				cpu-config-hi {
+-					temperature = <80>;
+-					hysteresis = <2>;
++					temperature = <80000>;
++					hysteresis = <2000>;
+ 					type = "configurable_hi";
+ 				};
+ 
+ 				cpu-config-lo {
+-					temperature = <70>;
+-					hysteresis = <2>;
++					temperature = <70000>;
++					hysteresis = <2000>;
+ 					type = "configurable_lo";
+ 				};
+ 
+ 				cpu-critical-low {
+ 					temperature = <0>;
+-					hysteresis = <2>;
++					hysteresis = <2000>;
+ 					type = "critical_low";
+ 				};
+ 			};

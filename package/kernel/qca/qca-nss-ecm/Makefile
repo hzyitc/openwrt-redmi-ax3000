@@ -3,7 +3,7 @@ include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=qca-nss-ecm
 PKG_VERSION:=NHSS.QSDK.11.5.0.5.1
-PKG_RELEASE:=1
+PKG_RELEASE:=5
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://git.codelinaro.org/clo/qsdk/oss/lklm/qca-nss-ecm
@@ -11,6 +11,14 @@ PKG_SOURCE_VERSION:=2ee73530d3bf7b6c0e00707daf98ce04d7e0503d
 PKG_MIRROR_HASH:=skip
 
 LOCAL_VARIANT=$(patsubst qca-nss-ecm-%,%,$(patsubst qca-nss-ecm-%,%,$(BUILD_VARIANT)))
+
+# Bridge hooks require the QSDK kernel interfaces and the NSS frontend.
+ifeq ($(CONFIG_TARGET_ipq50xx),y)
+ifneq ($(BUILD_VARIANT),nonss)
+PATCH_DIR:=./patches-ipq50xx
+endif
+endif
+
 include $(INCLUDE_DIR)/package.mk
 
 ifeq ($(CONFIG_QCA_NSS_ECM_EXAMPLES_PCC),y)
@@ -35,7 +43,7 @@ define KernelPackage/qca-nss-ecm/Default
   CATEGORY:=Kernel modules
   SUBMENU:=Network Support
   DEPENDS:=@(TARGET_ipq50xx||TARGET_ipq60xx||TARGET_ipq806x||TARGET_ipq807x) \
-	+kmod-ipt-conntrack +iptables-mod-extra \
+	+kmod-ipt-conntrack +iptables-mod-extra +TARGET_ipq50xx:kmod-br-netfilter \
 	+kmod-qca-nss-drv \
 	+kmod-pppoe \
 	+PACKAGE_kmod-qca-ovsmgr:kmod-qca-ovsmgr
@@ -83,6 +91,7 @@ define KernelPackage/qca-nss-ecm/Default/install
 	$(INSTALL_BIN) ./files/on-demand-down $(1)/lib/netifd/offload/on-demand-down
 	$(INSTALL_DATA) ./files/qca-nss-ecm.uci $(1)/etc/config/ecm
 	$(INSTALL_BIN) ./files/qca-nss-ecm.sysctl $(1)/etc/sysctl.d/qca-nss-ecm.conf
+	$(if $(and $(CONFIG_TARGET_ipq50xx),$(filter-out nonss,$(BUILD_VARIANT))),$(INSTALL_DATA) ./files/qca-nss-ecm-ipq50xx.sysctl $(1)/etc/sysctl.d/12-qca-nss-ecm-bridge.conf)
 # ifeq ($(CONFIG_KERNEL_IPQ_MEM_PROFILE),256)
 # 	echo 'net.netfilter.nf_conntrack_max=2048' >> $(1)/etc/sysctl.d/qca-nss-ecm.conf
 # else ifeq ($(CONFIG_LOWMEM_FLASH),y)
@@ -322,6 +331,7 @@ define Build/Compile
 	$(MAKE) -C "$(LINUX_DIR)" $(strip $(ECM_MAKE_OPTS)) \
 		CROSS_COMPILE="$(TARGET_CROSS)" \
 		ARCH="$(LINUX_KARCH)" \
+		KBUILD_EXTRA_SYMBOLS="$(wildcard $(PKG_SYMVERS_DIR)/*.symvers)" \
 		M="$(PKG_BUILD_DIR)" \
 		EXTRA_CFLAGS="$(EXTRA_CFLAGS)" SoC="$(subtarget)" \
 		EXAMPLES_BUILD_PCC="$(CONFIG_QCA_NSS_ECM_EXAMPLES_PCC)" \
