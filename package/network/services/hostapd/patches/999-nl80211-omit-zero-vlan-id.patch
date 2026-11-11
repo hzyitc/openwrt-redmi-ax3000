@@ -1,0 +1,19 @@
+From: seeker <gmx472@qq.com>
+Subject: [PATCH] nl80211: omit VLAN ID for an untagged station
+
+NSS advertises VLAN offload, including on ordinary AP interfaces. Sending
+NL80211_ATTR_VLAN_ID=0 is rejected by cfg80211's 1..4094 policy before the
+station is authorized. Leave the attribute absent for an untagged station;
+the kernel initializes the station VLAN ID to zero in that case.
+
+--- a/src/drivers/driver_nl80211.c
++++ b/src/drivers/driver_nl80211.c
+@@ -6943,7 +6943,7 @@ static int i802_set_sta_vlan(struct i802_bss *bss, const u8 *addr,
+ 		   MAC2STR(addr), ifname, if_nametoindex(ifname), vlan_id);
+ 	if (!(msg = nl80211_bss_msg(bss, 0, NL80211_CMD_SET_STATION)) ||
+ 	    nla_put(msg, NL80211_ATTR_MAC, ETH_ALEN, addr) ||
+-	    ((drv->capa.flags & WPA_DRIVER_FLAGS_VLAN_OFFLOAD) &&
++	    (vlan_id && (drv->capa.flags & WPA_DRIVER_FLAGS_VLAN_OFFLOAD) &&
+ 	     nla_put_u16(msg, NL80211_ATTR_VLAN_ID, vlan_id)) ||
+ 	    nla_put_u32(msg, NL80211_ATTR_STA_VLAN, if_nametoindex(ifname))) {
+ 		nlmsg_free(msg);
