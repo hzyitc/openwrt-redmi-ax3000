@@ -47,6 +47,7 @@ jobs:
             CONFIG_TARGET_PER_DEVICE_ROOTFS=y
 
             CONFIG_ATH11K_MEM_PROFILE_256M=y
+            CONFIG_ATH11K_THERMAL=y
 
             CONFIG_IB=y
             # CONFIG_IB_STANDALONE is not set
@@ -79,6 +80,10 @@ jobs:
       - name: Build all
         run: |
           make -j$(nproc) IGNORE_ERRORS=1
+
+      - name: Run Redmi NSS regression and packaging checks
+        run: |
+          python3 scripts/test-redmi-nss.py --rootfs build_dir/target-*/root-ipq50xx
 
       - name: Upload bin to artifacts
         uses: actions/upload-artifact@v3

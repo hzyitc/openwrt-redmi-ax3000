@@ -19,6 +19,27 @@
 >	EOF
 >	```
 
+## Redmi AX3000 NSS build profile
+
+This profile targets the QSDK 5.4 / OpenWrt 21.02 branch. In the build
+instructions below, use this configuration after installing the feeds:
+
+```bash
+cp configs/redmi-ax3000-nss.config .config
+make defconfig
+```
+
+The profile enables NSS acceleration, ECM startup and SoC/Wi-Fi temperature
+monitoring. Temperatures use milliCelsius (`45000` means 45°C); automatic
+CPU throttling is not configured.
+
+The default upgrade handler requires both `rootfs` and `rootfs_1`. Merged
+layouts require a recovery procedure verified for the installed bootloader
+and partition table.
+
+See [NSS validation](docs/redmi-ax3000-nss-validation.md) for regression
+commands, post-boot checks and the UART power-cycle limitation.
+
 ## How to build
 
 OS: `Ubuntu 20.04 (focal)`
@@ -32,7 +53,8 @@ sudo apt install build-essential clang flex g++ gawk gcc-multilib gettext \
   coccinelle
 
 # Clone this repo
-git clone https://github.com/hzyitc/openwrt-redmi-ax3000
+git clone --branch ipq50xx-qsdk-kernel-5.4-openwrt-21.02-qsdk-11.5.05.841.1029 \
+  https://github.com/hzyitc/openwrt-redmi-ax3000
 cd openwrt-redmi-ax3000
 
 # Update and install feeds
@@ -54,6 +76,9 @@ make -j$(nproc)
 ### Get `UART` access
 
 > Input from `UART` will be allowed after a successful `TFTP recovery`.
+
+Use a 1.8 V UART adapter; IPQ5018 UART pins also carry boot configuration
+signals. See the [UART limitation](docs/redmi-ax3000-nss-validation.md#installation-and-uart-limitations).
 
 1. Connect `UART` and `LAN`.
 
@@ -104,7 +129,8 @@ Now we have enabled `UART`.
 
 #### a. Use `U-boot` to flash
 
-Download [`openwrt-ipq50xx-arm-redmi_ax3000-squashfs-nand-factory.ubi`](https://github.com/hzyitc/openwrt-redmi-ax3000/releases/latest/download/openwrt-ipq50xx-arm-redmi_ax3000-squashfs-nand-factory.ubi) and put it into TFTP root.
+Copy `openwrt-ipq50xx-arm-redmi_ax3000-squashfs-nand-factory.ubi` from this
+QSDK build's `bin/targets/ipq50xx/arm/` directory into the TFTP root.
 
 Then run the following command inside `U-boot`:
 
@@ -139,7 +165,8 @@ reset
 
 ```bash
 cd /tmp
-wget https://github.com/hzyitc/openwrt-redmi-ax3000/releases/latest/download/openwrt-ipq50xx-arm-redmi_ax3000-squashfs-nand-factory.ubi
+# Transfer the factory UBI from this QSDK build into /tmp before continuing.
+[ -f openwrt-ipq50xx-arm-redmi_ax3000-squashfs-nand-factory.ubi ] || exit 1
 
 # Check your partition table
 # cat /proc/mtd
