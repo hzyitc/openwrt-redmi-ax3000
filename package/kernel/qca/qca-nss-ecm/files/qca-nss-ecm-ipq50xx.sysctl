@@ -1,0 +1,3 @@
+# QSDK skips BR_HOOK entirely unless a bridge hook consumer is enabled.
+# Run ECM's custom bridge hooks without enabling iptables bridge filtering.
+net.bridge.bridge-nf-call-custom=1
