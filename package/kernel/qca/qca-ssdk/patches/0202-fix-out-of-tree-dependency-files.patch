@@ -1,0 +1,28 @@
+Subject: [PATCH] ssdk: fix dependency files in out-of-tree builds
+
+The dependency files are generated under $(DST_DIR), while the object
+rule asks make for a relative %.d prerequisite. GNU make resolves it to
+the absolute path through vpath, but the rule that generates it only
+matches the relative target. Build dependencies before objects and let
+the included dependency files track header changes.
+
+---
+diff --git a/make/target.mk b/make/target.mk
+--- a/make/target.mk
++++ b/make/target.mk
+@@ -3,13 +3,13 @@ include $(PRJ_PATH)/make/$(OS)_opt.mk
+ 
+ include $(PRJ_PATH)/make/tools.mk
+ 
+-obj: $(OBJ_LIST)
++obj: dep $(OBJ_LIST)
+ 	$(OBJ_LOOP)
+ 
+ dep: build_dir $(DEP_LIST)
+ 	$(DEP_LOOP)
+ 
+-$(OBJ_LIST): %.o : %.c %.d
++$(OBJ_LIST): %.o : %.c
+ 	$(CC) $(CFLAGS) $(LOCAL_CFLAGS) -c $< -o $(DST_DIR)/$@
+ 
+ $(DEP_LIST) : %.d : %.c

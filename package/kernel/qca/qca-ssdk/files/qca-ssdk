@@ -249,6 +249,7 @@ function ipq50xx_uniphy_amplitude_set () {
 }
 
 start() {
+	command -v ssdk_sh >/dev/null 2>&1 || return 0
 	chip_ver=`ssdk_sh debug reg get 0 4 | grep Data | tr -d 'SSDK Init OK![Data]:'`
 	#The following commands should be uncommented to enable EDMA WAR
 	if [ "$chip_ver" = "0x1401" ]; then
@@ -261,7 +262,7 @@ start() {
 		echo ''
 	fi
 	#The following commands should be uncommented to enable WAR for ipq50xx
-	chip_type_info=`cat tmp/sysinfo/model`
+	chip_type_info=`cat /tmp/sysinfo/model`
 	result=$(echo $chip_type_info | grep "IPQ5018")
 	if [ "$result" != "" ]; then
 		#ipq50xx_serdes_monitor &
@@ -273,6 +274,7 @@ start() {
 }
 
 stop() {
+	command -v ssdk_sh >/dev/null 2>&1 || return 0
 	chip_ver=`ssdk_sh debug reg get 0 4 | grep Data | tr -d 'SSDK Init OK![Data]:'`
 	#The following commands should be uncommented to disable EDMA WAR
 	if [ "$chip_ver" = "0x1401" ]; then
